@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
-import { extname, join, parse } from "node:path";
+import { join, parse } from "node:path";
 import { promisify } from "node:util";
+import { webUtils } from "electron";
 import { App, FileSystemAdapter, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, normalizePath, requestUrl } from "obsidian";
 import { numberedPath, processMarkdown } from "./output";
 
@@ -21,6 +22,18 @@ const ADDONS = {
 
 type Addon = keyof typeof ADDONS;
 
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
+const isAddon = (value: unknown): value is Addon => typeof value === "string" && value in ADDONS;
+const readAddons = (value: unknown): Addon[] | null => {
+  if (!Array.isArray(value)) return null;
+  const addons: Addon[] = [];
+  for (const item of value as unknown[]) {
+    if (!isAddon(item)) return null;
+    addons.push(item);
+  }
+  return addons;
+};
+
 interface SourceDownSettings {
   pythonCommand: string;
   outputFolder: string;
@@ -39,12 +52,19 @@ export default class SourceDownPlugin extends Plugin {
   settings: SourceDownSettings = DEFAULT_SETTINGS;
 
   async onload(): Promise<void> {
-    const saved = await this.loadData();
+    const loaded: unknown = await this.loadData();
+    const saved = isRecord(loaded) ? loaded : {};
+    const addons = { ...DEFAULT_SETTINGS.addons };
+    if (isRecord(saved.addons)) {
+      for (const addon of Object.keys(ADDONS) as Addon[]) {
+        if (typeof saved.addons[addon] === "boolean") addons[addon] = saved.addons[addon];
+      }
+    }
     this.settings = {
-      pythonCommand: saved?.pythonCommand ?? DEFAULT_SETTINGS.pythonCommand,
-      outputFolder: saved?.outputFolder ?? DEFAULT_SETTINGS.outputFolder,
-      addons: Object.assign({}, DEFAULT_SETTINGS.addons, saved?.addons),
-      installedAddons: saved?.installedAddons ?? null,
+      pythonCommand: typeof saved.pythonCommand === "string" ? saved.pythonCommand : DEFAULT_SETTINGS.pythonCommand,
+      outputFolder: typeof saved.outputFolder === "string" ? saved.outputFolder : DEFAULT_SETTINGS.outputFolder,
+      addons,
+      installedAddons: readAddons(saved.installedAddons),
     };
     this.addRibbonIcon("file-down", "Open SourceDown", () => new ConvertModal(this.app, this).open());
     this.addCommand({ id: "open-converter", name: "Open converter", callback: () => new ConvertModal(this.app, this).open() });
@@ -106,7 +126,9 @@ export default class SourceDownPlugin extends Plugin {
       return "Not installed";
     }
     try {
-      const latest = (await requestUrl("https://pypi.org/pypi/markitdown/json")).json.info.version as string;
+      const body: unknown = (await requestUrl("https://pypi.org/pypi/markitdown/json")).json;
+      if (!isRecord(body) || !isRecord(body.info) || typeof body.info.version !== "string") throw new Error("Invalid PyPI response");
+      const latest = body.info.version;
       return installed === latest ? `Installed: ${installed} (up to date)` : `Installed: ${installed} · Update available: ${latest}`;
     } catch {
       return `Installed: ${installed} (could not check for updates)`;
@@ -120,7 +142,7 @@ export default class SourceDownPlugin extends Plugin {
   }
 
   async convertExternalFile(file: File): Promise<void> {
-    const source = (require("electron") as { webUtils: { getPathForFile(file: File): string } }).webUtils.getPathForFile(file);
+    const source = webUtils.getPathForFile(file);
     if (!source) throw new Error("Obsidian did not provide a local path for this file.");
     await this.convert(source, parse(file.name).name, this.settings.outputFolder, file.name);
   }
@@ -153,7 +175,7 @@ export default class SourceDownPlugin extends Plugin {
         const bytes = image.bytes;
         await this.app.vault.createBinary(
           normalizePath(`${folder ? `${folder}/` : ""}${image.path}`),
-          bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+          Uint8Array.from(bytes).buffer,
         );
       }
       const file = await this.app.vault.create(target, processed.markdown);
@@ -212,7 +234,9 @@ class SourceDownSettingTab extends PluginSettingTab {
       button.setButtonText("Install / update").setCta().onClick(async () => {
         button.setDisabled(true).setButtonText("Installing…");
         try {
-          await this.plugin.installOrUpdate((message) => installer.setDesc(message));
+          await this.plugin.installOrUpdate((message) => {
+            installer.setDesc(message);
+          });
           installer.setDesc("Installation complete.");
           new Notice("MarkItDown installed.");
           await this.refreshStatus(status);
