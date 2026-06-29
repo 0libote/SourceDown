@@ -1,7 +1,7 @@
 {
   "id": "sourcedown",
   "name": "SourceDown",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "minAppVersion": "1.5.0",
   "description": "Import documents, media, archives, and web pages as Markdown using Microsoft MarkItDown.",
   "author": "0libots",
