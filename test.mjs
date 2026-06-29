@@ -14,3 +14,20 @@ assert.match(result.markdown, /^---\nsource: "\/tmp\/report\.pdf"/);
 assert.match(result.markdown, /!\[Chart\]\(report-assets\/image-001\.png\)/);
 assert.equal(result.images[0].bytes.toString(), "hello");
 assert.equal(numberedPath("Imports", "report", 2), "Imports/report-2.md");
+
+const pythonSource = await readFile("src/python.ts", "utf8");
+const pythonJs = ts.transpile(pythonSource, { module: ts.ModuleKind.CommonJS });
+const pythonModule = { exports: {} };
+vm.runInNewContext(pythonJs, { module: pythonModule, exports: pythonModule.exports });
+const { pythonCandidates } = pythonModule.exports;
+
+assert.deepEqual(
+  Array.from(pythonCandidates("python3", "darwin")).slice(0, 3),
+  ["python3", "python", "/opt/homebrew/bin/python3"],
+);
+assert.deepEqual(Array.from(pythonCandidates("C:\\Python312\\python.exe", "win32")), [
+  "C:\\Python312\\python.exe",
+  "py",
+  "python",
+  "python3",
+]);

@@ -1,9 +1,10 @@
 import { execFile } from "node:child_process";
 import { join, parse } from "node:path";
 import { promisify } from "node:util";
-import { webUtils } from "electron";
+import { shell, webUtils } from "electron";
 import { App, FileSystemAdapter, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, normalizePath, requestUrl } from "obsidian";
 import { numberedPath, processMarkdown } from "./output";
+import { pythonCandidates } from "./python";
 
 const exec = promisify(execFile);
 
@@ -90,9 +91,8 @@ export default class SourceDownPlugin extends Plugin {
   }
 
   async installOrUpdate(progress: (message: string) => void): Promise<void> {
-    const python = this.settings.pythonCommand.trim() || "python3";
-    progress("Checking Python…");
-    await exec(python, ["-c", "import sys; assert sys.version_info >= (3, 10)"], { timeout: 30_000 });
+    progress("Looking for Python 3.10 or newer…");
+    const python = await this.findPython();
     progress("Creating the private environment…");
     await exec(python, ["-m", "venv", "--clear", join(this.pluginDirectory, ".venv")], { timeout: 120_000 });
     const venvPython = join(
@@ -110,6 +110,20 @@ export default class SourceDownPlugin extends Plugin {
     });
     this.settings.installedAddons = addons;
     await this.saveData(this.settings);
+  }
+
+  private async findPython(): Promise<string> {
+    for (const candidate of pythonCandidates(this.settings.pythonCommand, process.platform)) {
+      try {
+        await exec(candidate, ["-c", "import sys; raise SystemExit(sys.version_info < (3, 10))"], { timeout: 10_000 });
+        this.settings.pythonCommand = candidate;
+        await this.saveData(this.settings);
+        return candidate;
+      } catch {
+        continue;
+      }
+    }
+    throw new Error("Python 3.10 or newer was not found. Install Python, then click Install / update again.");
   }
 
   addonsChanged(): boolean {
@@ -247,6 +261,11 @@ class SourceDownSettingTab extends PluginSettingTab {
         } finally {
           button.setDisabled(false).setButtonText("Install / update");
         }
+      }),
+    );
+    installer.addButton((button) =>
+      button.setButtonText("Get Python").onClick(() => {
+        void shell.openExternal("https://www.python.org/downloads/");
       }),
     );
     new Setting(this.containerEl).setName("Python command").addText((text) =>
