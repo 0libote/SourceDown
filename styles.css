@@ -1,0 +1,9 @@
+.sourcedown-url {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.sourcedown-url input {
+  flex: 1;
+}
