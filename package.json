@@ -11,7 +11,7 @@
   "repository": "https://github.com/0libote/MarkItDown",
   "devDependencies": {
     "@types/node": "^24.0.0",
-    "esbuild": "^0.25.0",
+    "esbuild": "^0.28.1",
     "obsidian": "^1.8.0",
     "typescript": "^5.8.0"
   }
