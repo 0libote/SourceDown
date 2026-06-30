@@ -10,7 +10,7 @@ Import complex documents and other sources into Obsidian using [Microsoft MarkIt
 
 Converted notes include source metadata. Embedded images are saved beside the note in an asset folder, and duplicate imports receive numbered filenames.
 
-MarkItDown requires Python 3.10+. The plugin installs it into its own local app data virtual environment. On Windows this is `%LOCALAPPDATA%\SourceDown\.venv`; it does not modify your global Python packages or store the environment inside your vault.
+MarkItDown requires Python 3.10+. The plugin installs it into its own local app data virtual environment. On Windows this is `%LOCALAPPDATA%\SourceDown\.venv`; it does not modify your global Python packages or store the environment inside your vault. Installed add-on state is stored beside the local environment so it can be reused across vaults.
 
 ## Develop
 
