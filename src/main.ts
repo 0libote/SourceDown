@@ -74,8 +74,8 @@ export default class SourceDownPlugin extends Plugin {
       addons,
       installedAddons: readAddons(saved.installedAddons),
     };
-    this.addRibbonIcon("file-down", "Open SourceDown", () => void this.run(() => this.openConverter()));
-    this.addCommand({ id: "open-converter", name: "Open converter", callback: () => void this.run(() => this.openConverter()) });
+    this.addRibbonIcon("file-down", "Open SourceDown", () => this.openConverter());
+    this.addCommand({ id: "open-converter", name: "Open converter", callback: () => this.openConverter() });
     this.registerEvent(
       this.app.workspace.on("file-menu", (menu, file) => {
         if (!(file instanceof TFile) || file.extension === "md") return;
@@ -126,8 +126,7 @@ export default class SourceDownPlugin extends Plugin {
     await this.saveData(this.settings);
   }
 
-  private async openConverter(): Promise<void> {
-    await this.ensureReady();
+  private openConverter(): void {
     new ConvertModal(this.app, this).open();
   }
 
