@@ -1,17 +1,44 @@
+.sourcedown-selector {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 4px;
+  margin: 16px 0;
+  border-radius: var(--radius-m);
+  background: var(--background-secondary);
+}
+
+.sourcedown-selector button {
+  width: 100%;
+  box-shadow: none;
+}
+
+.sourcedown-selector button[aria-pressed="true"] {
+  color: var(--text-normal);
+  background: var(--background-primary);
+  box-shadow: var(--shadow-s);
+}
+
+.sourcedown-panel {
+  padding: 16px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+}
+
 .sourcedown-url {
-  display: flex;
+  display: grid;
+  grid-template-columns: 2fr 1fr auto;
   gap: 8px;
-  margin-top: 16px;
 }
 
 .sourcedown-url input {
-  flex: 1;
+  width: 100%;
 }
 
 .sourcedown-field {
   display: grid;
   gap: 6px;
-  margin: 14px 0;
+  margin-bottom: 14px;
 }
 
 .sourcedown-field label {
@@ -23,9 +50,15 @@
   width: 100%;
 }
 
+.sourcedown-field input[type="file"] {
+  padding: 6px;
+  border: 1px dashed var(--background-modifier-border);
+  border-radius: var(--radius-s);
+}
+
 .sourcedown-destination {
   display: block;
-  margin-bottom: 14px;
+  margin: 12px 0;
   color: var(--text-muted);
 }
 

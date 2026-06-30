@@ -356,20 +356,18 @@ class ConvertModal extends Modal {
   onOpen(): void {
     this.contentEl.createEl("h2", { text: "SourceDown" });
     this.contentEl.createEl("p", {
-      text: `Files from your computer become Markdown notes in ${this.plugin.settings.outputFolder || "the vault root"}. Embedded images go into a matching -assets folder.`,
-    });
-    this.contentEl.createEl("p", {
-      text: "For files already in your vault, right-click the file instead; the converted note will be created beside it.",
+      text: `Import into ${this.plugin.settings.outputFolder || "the vault root"} as a Markdown note.`,
     });
 
-    const fileField = this.contentEl.createDiv("sourcedown-field");
+    const filePanel = this.contentEl.createDiv("sourcedown-panel");
+    const fileField = filePanel.createDiv("sourcedown-field");
     fileField.createEl("label", { text: "Choose a file", attr: { for: "sourcedown-file" } });
     const input = fileField.createEl("input", { type: "file", attr: { id: "sourcedown-file" } });
-    const nameField = this.contentEl.createDiv("sourcedown-field");
+    const nameField = filePanel.createDiv("sourcedown-field");
     nameField.createEl("label", { text: "Note name", attr: { for: "sourcedown-name" } });
     const name = nameField.createEl("input", { type: "text", attr: { id: "sourcedown-name" } });
-    const destination = this.contentEl.createEl("small", { cls: "sourcedown-destination" });
-    const convert = this.contentEl.createEl("button", { text: "Convert file", cls: "mod-cta" });
+    const destination = filePanel.createEl("small", { cls: "sourcedown-destination" });
+    const convert = filePanel.createEl("button", { text: "Convert file", cls: "mod-cta" });
     convert.disabled = true;
 
     const updateDestination = (): void => {
@@ -389,16 +387,20 @@ class ConvertModal extends Modal {
     updateDestination();
 
     if (this.plugin.youtubeInstalled()) {
-      this.contentEl.createEl("h3", { text: "YouTube" });
-      this.contentEl.createEl("p", { text: `YouTube transcripts are also saved in ${this.plugin.settings.outputFolder || "the vault root"}.` });
-      const row = this.contentEl.createDiv("sourcedown-url");
+      const selector = this.contentEl.createDiv("sourcedown-selector");
+      this.contentEl.insertBefore(selector, filePanel);
+      const fileButton = selector.createEl("button", { text: "File", attr: { "aria-pressed": "true" } });
+      const linkButton = selector.createEl("button", { text: "YouTube link", attr: { "aria-pressed": "false" } });
+      const linkPanel = this.contentEl.createDiv("sourcedown-panel");
+      linkPanel.hidden = true;
+      const row = linkPanel.createDiv("sourcedown-url");
       const url = row.createEl("input", { type: "url", placeholder: "YouTube URL", attr: { "aria-label": "YouTube URL" } });
       const urlName = row.createEl("input", { type: "text", placeholder: "Note name", attr: { "aria-label": "Note name" } });
       urlName.value = `youtube-${Date.now()}`;
       row.createEl("button", { text: "Convert", cls: "mod-cta" }).addEventListener("click", () =>
         void this.plugin.run(() => this.plugin.convertUrl(url.value, urlName.value)),
       );
-      const urlDestination = this.contentEl.createEl("small", { cls: "sourcedown-destination" });
+      const urlDestination = linkPanel.createEl("small", { cls: "sourcedown-destination" });
       const updateUrlDestination = (): void => {
         urlDestination.setText(
           `Creates: ${this.plugin.settings.outputFolder ? `${this.plugin.settings.outputFolder}/` : ""}${urlName.value || "…"}.md`,
@@ -406,6 +408,14 @@ class ConvertModal extends Modal {
       };
       urlName.addEventListener("input", updateUrlDestination);
       updateUrlDestination();
+      const show = (link: boolean): void => {
+        filePanel.hidden = link;
+        linkPanel.hidden = !link;
+        fileButton.setAttribute("aria-pressed", String(!link));
+        linkButton.setAttribute("aria-pressed", String(link));
+      };
+      fileButton.addEventListener("click", () => show(false));
+      linkButton.addEventListener("click", () => show(true));
     }
   }
 }
