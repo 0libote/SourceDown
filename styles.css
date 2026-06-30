@@ -7,3 +7,24 @@
 .sourcedown-url input {
   flex: 1;
 }
+
+.sourcedown-field {
+  display: grid;
+  gap: 6px;
+  margin: 14px 0;
+}
+
+.sourcedown-field label {
+  font-weight: var(--font-semibold);
+}
+
+.sourcedown-field input,
+.sourcedown-name {
+  width: 100%;
+}
+
+.sourcedown-destination {
+  display: block;
+  margin-bottom: 14px;
+  color: var(--text-muted);
+}

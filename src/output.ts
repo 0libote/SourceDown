@@ -32,3 +32,9 @@ export function processMarkdown(markdown: string, source: string, noteName: stri
 export function numberedPath(folder: string, name: string, number: number): string {
   return `${folder ? `${folder}/` : ""}${name}${number === 1 ? "" : `-${number}`}.md`;
 }
+
+export function noteName(value: string): string {
+  const name = value.trim().replace(/\.md$/i, "");
+  if (!name || name === "." || name === ".." || /[\\/]/.test(name)) throw new Error("Enter a file name without folders.");
+  return name;
+}

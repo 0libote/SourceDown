@@ -3,7 +3,7 @@ import { join, parse } from "node:path";
 import { promisify } from "node:util";
 import { shell, webUtils } from "electron";
 import { App, FileSystemAdapter, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, normalizePath, requestUrl } from "obsidian";
-import { numberedPath, processMarkdown } from "./output";
+import { noteName, numberedPath, processMarkdown } from "./output";
 import { pythonCandidates } from "./python";
 
 const exec = promisify(execFile);
@@ -73,7 +73,14 @@ export default class SourceDownPlugin extends Plugin {
       this.app.workspace.on("file-menu", (menu, file) => {
         if (!(file instanceof TFile) || file.extension === "md") return;
         menu.addItem((item) =>
-          item.setTitle("Convert to Markdown").setIcon("file-down").onClick(() => void this.run(() => this.convertVaultFile(file))),
+          item
+            .setTitle("Convert to Markdown")
+            .setIcon("file-down")
+            .onClick(() =>
+              new NameModal(this.app, file.basename, `The note will be created beside ${file.name}.`, (name) =>
+                this.run(() => this.convertVaultFile(file, name)),
+              ).open(),
+            ),
         );
       }),
     );
@@ -131,6 +138,10 @@ export default class SourceDownPlugin extends Plugin {
     return this.settings.installedAddons === null || selected.join() !== this.settings.installedAddons.join();
   }
 
+  youtubeInstalled(): boolean {
+    return this.settings.installedAddons?.includes("youtube-transcription") === true;
+  }
+
   async status(): Promise<string> {
     let installed: string;
     try {
@@ -149,22 +160,22 @@ export default class SourceDownPlugin extends Plugin {
     }
   }
 
-  async convertVaultFile(file: TFile): Promise<void> {
+  async convertVaultFile(file: TFile, name = file.basename): Promise<void> {
     const adapter = this.app.vault.adapter;
     if (!(adapter instanceof FileSystemAdapter)) throw new Error("SourceDown requires a local vault.");
-    await this.convert(adapter.getFullPath(file.path), file.basename, file.parent?.path ?? "", file.path);
+    await this.convert(adapter.getFullPath(file.path), noteName(name), file.parent?.path ?? "", file.path);
   }
 
-  async convertExternalFile(file: File): Promise<void> {
+  async convertExternalFile(file: File, name: string): Promise<void> {
     const source = webUtils.getPathForFile(file);
     if (!source) throw new Error("Obsidian did not provide a local path for this file.");
-    await this.convert(source, parse(file.name).name, this.settings.outputFolder, file.name);
+    await this.convert(source, noteName(name), this.settings.outputFolder, file.name);
   }
 
-  async convertUrl(value: string): Promise<void> {
+  async convertUrl(value: string, name: string): Promise<void> {
     const url = new URL(value);
     if (!["http:", "https:"].includes(url.protocol)) throw new Error("Enter an HTTP or HTTPS URL.");
-    await this.convert(url.href, `sourcedown-${Date.now()}`, this.settings.outputFolder);
+    await this.convert(url.href, noteName(name), this.settings.outputFolder);
   }
 
   async run(action: () => Promise<void>): Promise<void> {
@@ -221,15 +232,85 @@ class ConvertModal extends Modal {
 
   onOpen(): void {
     this.contentEl.createEl("h2", { text: "SourceDown" });
-    const input = this.contentEl.createEl("input", { type: "file", attr: { multiple: "true" } });
-    input.addEventListener("change", () => {
-      for (const file of Array.from(input.files ?? [])) void this.plugin.run(() => this.plugin.convertExternalFile(file));
+    this.contentEl.createEl("p", {
+      text: `Files from your computer become Markdown notes in ${this.plugin.settings.outputFolder || "the vault root"}. Embedded images go into a matching -assets folder.`,
     });
-    const row = this.contentEl.createDiv("sourcedown-url");
-    const url = row.createEl("input", { type: "url", placeholder: "https://…" });
-    row.createEl("button", { text: "Convert URL", cls: "mod-cta" }).addEventListener("click", () =>
-      void this.plugin.run(() => this.plugin.convertUrl(url.value)),
-    );
+    this.contentEl.createEl("p", {
+      text: "For files already in your vault, right-click the file instead; the converted note will be created beside it.",
+    });
+
+    const fileField = this.contentEl.createDiv("sourcedown-field");
+    fileField.createEl("label", { text: "Choose a file", attr: { for: "sourcedown-file" } });
+    const input = fileField.createEl("input", { type: "file", attr: { id: "sourcedown-file" } });
+    const nameField = this.contentEl.createDiv("sourcedown-field");
+    nameField.createEl("label", { text: "Note name", attr: { for: "sourcedown-name" } });
+    const name = nameField.createEl("input", { type: "text", attr: { id: "sourcedown-name" } });
+    const destination = this.contentEl.createEl("small", { cls: "sourcedown-destination" });
+    const convert = this.contentEl.createEl("button", { text: "Convert file", cls: "mod-cta" });
+    convert.disabled = true;
+
+    const updateDestination = (): void => {
+      convert.disabled = !input.files?.[0] || !name.value.trim();
+      destination.setText(`Creates: ${this.plugin.settings.outputFolder ? `${this.plugin.settings.outputFolder}/` : ""}${name.value || "…"}.md`);
+    };
+    input.addEventListener("change", () => {
+      const file = input.files?.[0];
+      if (file) name.value = parse(file.name).name;
+      updateDestination();
+    });
+    name.addEventListener("input", updateDestination);
+    convert.addEventListener("click", () => {
+      const file = input.files?.[0];
+      if (file) void this.plugin.run(() => this.plugin.convertExternalFile(file, name.value));
+    });
+    updateDestination();
+
+    if (this.plugin.youtubeInstalled()) {
+      this.contentEl.createEl("h3", { text: "YouTube" });
+      this.contentEl.createEl("p", { text: `YouTube transcripts are also saved in ${this.plugin.settings.outputFolder || "the vault root"}.` });
+      const row = this.contentEl.createDiv("sourcedown-url");
+      const url = row.createEl("input", { type: "url", placeholder: "YouTube URL", attr: { "aria-label": "YouTube URL" } });
+      const urlName = row.createEl("input", { type: "text", placeholder: "Note name", attr: { "aria-label": "Note name" } });
+      urlName.value = `youtube-${Date.now()}`;
+      row.createEl("button", { text: "Convert", cls: "mod-cta" }).addEventListener("click", () =>
+        void this.plugin.run(() => this.plugin.convertUrl(url.value, urlName.value)),
+      );
+      const urlDestination = this.contentEl.createEl("small", { cls: "sourcedown-destination" });
+      const updateUrlDestination = (): void => {
+        urlDestination.setText(
+          `Creates: ${this.plugin.settings.outputFolder ? `${this.plugin.settings.outputFolder}/` : ""}${urlName.value || "…"}.md`,
+        );
+      };
+      urlName.addEventListener("input", updateUrlDestination);
+      updateUrlDestination();
+    }
+  }
+}
+
+class NameModal extends Modal {
+  constructor(
+    app: App,
+    private initialName: string,
+    private description: string,
+    private submit: (name: string) => Promise<void>,
+  ) {
+    super(app);
+  }
+
+  onOpen(): void {
+    this.contentEl.createEl("h2", { text: "Choose note name" });
+    this.contentEl.createEl("p", { text: this.description });
+    const input = this.contentEl.createEl("input", { type: "text", value: this.initialName, cls: "sourcedown-name" });
+    const convert = this.contentEl.createEl("button", { text: "Convert", cls: "mod-cta" });
+    convert.addEventListener("click", () => {
+      void this.submit(input.value);
+      this.close();
+    });
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") convert.click();
+    });
+    input.focus();
+    input.select();
   }
 }
 
