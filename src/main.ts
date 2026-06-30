@@ -33,8 +33,6 @@ const appDataRoot = (): string => {
 
 const ADDONS = {
   "audio-transcription": "Audio transcription",
-  "az-content-understanding": "Azure Content Understanding",
-  "az-doc-intel": "Azure Document Intelligence",
   docx: "Word (DOCX)",
   outlook: "Outlook messages",
   pdf: "PDF",
@@ -142,19 +140,18 @@ export default class SourceDownPlugin extends Plugin {
     progress("Looking for Python 3.10 or newer…");
     const python = await this.findPython();
     progress("Creating or reusing the private environment…");
-    const rebuilt = await this.createOrUpdateVenv(python, progress);
     const addons = (Object.keys(ADDONS) as Addon[]).filter((addon) => this.settings.addons[addon]);
+    await this.createOrUpdateVenv(python, progress, this.addonsChanged());
     const packageName = addons.length ? `markitdown[${addons.join(",")}]` : "markitdown";
     progress(`Installing MarkItDown and ${addons.length} add-on${addons.length === 1 ? "" : "s"}…`);
     await exec(this.venvPython, ["-m", "pip", "install", "--upgrade", packageName], {
       maxBuffer: 20 * 1024 * 1024,
       timeout: 20 * 60_000,
     });
-    const installedAddons = rebuilt ? addons : Array.from(new Set([...(this.settings.installedAddons ?? []), ...addons]));
-    await this.setInstalledAddons(installedAddons);
+    await this.setInstalledAddons(addons);
   }
 
-  private async createOrUpdateVenv(python: string, progress: (message: string) => void): Promise<boolean> {
+  private async createOrUpdateVenv(python: string, progress: (message: string) => void, rebuild: boolean): Promise<void> {
     const pyvenvConfig = join(this.venvDirectory, "pyvenv.cfg");
     const create = async (): Promise<void> => {
       await exec(python, ["-m", "venv", this.venvDirectory], { timeout: 120_000 });
@@ -162,24 +159,29 @@ export default class SourceDownPlugin extends Plugin {
 
     if (!existsSync(this.venvDirectory)) {
       await create();
-      return true;
+      return;
+    }
+
+    if (rebuild) {
+      progress("Add-on selections changed. Rebuilding the private environment…");
+      rmSync(this.venvDirectory, { recursive: true, force: true });
+      await create();
+      return;
     }
 
     if (!existsSync(pyvenvConfig)) {
       progress("Existing environment is incomplete. Rebuilding it…");
       rmSync(this.venvDirectory, { recursive: true, force: true });
       await create();
-      return true;
+      return;
     }
 
     try {
       await exec(python, ["-m", "venv", "--upgrade", this.venvDirectory], { timeout: 120_000 });
-      return false;
     } catch {
       progress("Existing environment could not be updated. Rebuilding it…");
       rmSync(this.venvDirectory, { recursive: true, force: true });
       await create();
-      return true;
     }
   }
 
@@ -231,7 +233,11 @@ export default class SourceDownPlugin extends Plugin {
 
   addonsChanged(): boolean {
     const selected = (Object.keys(ADDONS) as Addon[]).filter((addon) => this.settings.addons[addon]);
-    return this.settings.installedAddons === null || selected.some((addon) => !this.settings.installedAddons?.includes(addon));
+    return (
+      this.settings.installedAddons === null ||
+      selected.length !== this.settings.installedAddons.length ||
+      selected.some((addon) => !this.settings.installedAddons?.includes(addon))
+    );
   }
 
   youtubeInstalled(): boolean {
@@ -315,7 +321,7 @@ export default class SourceDownPlugin extends Plugin {
     const target = normalizePath(numberedPath(folder, name, number));
     const notice = new Notice(`Converting ${source.startsWith("http") ? source : parse(source).base}…`, 0);
     try {
-      const { stdout } = await exec(this.executable, [source], { maxBuffer: 100 * 1024 * 1024 });
+      const { stdout } = await exec(this.executable, ["--keep-data-uris", source], { maxBuffer: 100 * 1024 * 1024 });
       await this.ensureFolder(folder);
       const processed = processMarkdown(stdout, sourceLabel, parse(target).name);
       for (const image of processed.images) {
