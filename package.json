@@ -1,6 +1,6 @@
 {
   "name": "obsidian-sourcedown",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "private": true,
   "scripts": {
     "build": "node esbuild.mjs",
@@ -8,7 +8,7 @@
     "test": "node test.mjs",
     "deploy": "npm run build && mkdir -p /Users/oliverheyburn/Documents/Main/.obsidian/plugins/sourcedown && cp main.js manifest.json styles.css /Users/oliverheyburn/Documents/Main/.obsidian/plugins/sourcedown/"
   },
-  "repository": "https://github.com/0libote/MarkItDown",
+  "repository": "https://github.com/0libote/SourceDown",
   "devDependencies": {
     "@types/node": "^26.0.1",
     "esbuild": "^0.28.1",
