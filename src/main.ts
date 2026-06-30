@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { join, parse } from "node:path";
 import { promisify } from "node:util";
 import { shell, webUtils } from "electron";
@@ -8,6 +9,12 @@ import { noteName, numberedPath, processMarkdown } from "./output";
 import { pythonCandidates } from "./python";
 
 const exec = promisify(execFile);
+
+const appDataRoot = (): string => {
+  if (process.platform === "win32") return process.env.LOCALAPPDATA ?? join(process.env.USERPROFILE ?? process.cwd(), "AppData", "Local");
+  if (process.platform === "darwin") return join(process.env.HOME ?? process.cwd(), "Library", "Application Support");
+  return process.env.XDG_DATA_HOME ?? join(process.env.HOME ?? process.cwd(), ".local", "share");
+};
 
 class SetupError extends Error {
   constructor(message: string, readonly pythonMissing = false) {
@@ -94,24 +101,27 @@ export default class SourceDownPlugin extends Plugin {
     this.addSettingTab(new SourceDownSettingTab(this.app, this));
   }
 
-  private get pluginDirectory(): string {
-    const adapter = this.app.vault.adapter;
-    if (!(adapter instanceof FileSystemAdapter)) throw new Error("SourceDown requires a local vault.");
-    return adapter.getFullPath(`${this.app.vault.configDir}/plugins/${this.manifest.id}`);
+  private get venvDirectory(): string {
+    return join(appDataRoot(), "SourceDown", ".venv");
   }
 
   private get executable(): string {
-    return join(this.pluginDirectory, ".venv", process.platform === "win32" ? "Scripts" : "bin", "markitdown");
+    return join(
+      this.venvDirectory,
+      process.platform === "win32" ? "Scripts" : "bin",
+      process.platform === "win32" ? "markitdown.exe" : "markitdown",
+    );
   }
 
   async installOrUpdate(progress: (message: string) => void): Promise<void> {
     progress("Looking for Python 3.10 or newer…");
     const python = await this.findPython();
-    progress("Creating the private environment…");
-    await exec(python, ["-m", "venv", "--clear", join(this.pluginDirectory, ".venv")], { timeout: 120_000 });
+    progress("Creating or reusing the private environment…");
+    await exec(python, existsSync(this.venvDirectory) ? ["-m", "venv", "--upgrade", this.venvDirectory] : ["-m", "venv", this.venvDirectory], {
+      timeout: 120_000,
+    });
     const venvPython = join(
-      this.pluginDirectory,
-      ".venv",
+      this.venvDirectory,
       process.platform === "win32" ? "Scripts" : "bin",
       process.platform === "win32" ? "python.exe" : "python",
     );
