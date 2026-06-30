@@ -3,10 +3,17 @@ import { join, parse } from "node:path";
 import { promisify } from "node:util";
 import { shell, webUtils } from "electron";
 import { App, FileSystemAdapter, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, normalizePath, requestUrl } from "obsidian";
+import { addonForFile } from "./formats";
 import { noteName, numberedPath, processMarkdown } from "./output";
 import { pythonCandidates } from "./python";
 
 const exec = promisify(execFile);
+
+class SetupError extends Error {
+  constructor(message: string, readonly pythonMissing = false) {
+    super(message);
+  }
+}
 
 const ADDONS = {
   "audio-transcription": "Audio transcription",
@@ -67,8 +74,8 @@ export default class SourceDownPlugin extends Plugin {
       addons,
       installedAddons: readAddons(saved.installedAddons),
     };
-    this.addRibbonIcon("file-down", "Open SourceDown", () => new ConvertModal(this.app, this).open());
-    this.addCommand({ id: "open-converter", name: "Open converter", callback: () => new ConvertModal(this.app, this).open() });
+    this.addRibbonIcon("file-down", "Open SourceDown", () => void this.run(() => this.openConverter()));
+    this.addCommand({ id: "open-converter", name: "Open converter", callback: () => void this.run(() => this.openConverter()) });
     this.registerEvent(
       this.app.workspace.on("file-menu", (menu, file) => {
         if (!(file instanceof TFile) || file.extension === "md") return;
@@ -119,18 +126,35 @@ export default class SourceDownPlugin extends Plugin {
     await this.saveData(this.settings);
   }
 
+  private async openConverter(): Promise<void> {
+    await this.ensureReady();
+    new ConvertModal(this.app, this).open();
+  }
+
   private async findPython(): Promise<string> {
+    const found = await this.detectPython();
+    if (found) {
+      this.settings.pythonCommand = found.command;
+      await this.saveData(this.settings);
+      return found.command;
+    }
+    throw new SetupError("Python 3.10 or newer was not found. Install Python, then click Install / update again.", true);
+  }
+
+  private async detectPython(): Promise<{ command: string; version: string } | null> {
     for (const candidate of pythonCandidates(this.settings.pythonCommand, process.platform)) {
       try {
-        await exec(candidate, ["-c", "import sys; raise SystemExit(sys.version_info < (3, 10))"], { timeout: 10_000 });
-        this.settings.pythonCommand = candidate;
-        await this.saveData(this.settings);
-        return candidate;
+        const { stdout } = await exec(
+          candidate,
+          ["-c", "import sys; assert sys.version_info >= (3, 10); print('.'.join(map(str, sys.version_info[:3])))"],
+          { timeout: 10_000 },
+        );
+        return { command: candidate, version: stdout.trim() };
       } catch {
         continue;
       }
     }
-    throw new Error("Python 3.10 or newer was not found. Install Python, then click Install / update again.");
+    return null;
   }
 
   addonsChanged(): boolean {
@@ -142,37 +166,46 @@ export default class SourceDownPlugin extends Plugin {
     return this.settings.installedAddons?.includes("youtube-transcription") === true;
   }
 
-  async status(): Promise<string> {
-    let installed: string;
+  async status(): Promise<{ ready: boolean; text: string }> {
+    const python = await this.detectPython();
+    let installed: string | null = null;
     try {
       const { stdout, stderr } = await exec(this.executable, ["--version"]);
       installed = `${stdout}${stderr}`.match(/\d+(?:\.\d+)+/)?.[0] ?? "unknown version";
     } catch {
-      return "Not installed";
+      // Report setup state below.
     }
+    if (!python && !installed) return { ready: false, text: "Setup required: Python 3.10+ was not found. Use Get Python below, then install MarkItDown." };
+    if (!installed) return { ready: false, text: `Setup required: Python ${python?.version} is ready, but MarkItDown is not installed.` };
+    if (!python) return { ready: false, text: `MarkItDown ${installed} is installed. Python 3.10+ is needed for installs and updates.` };
+    let text = `Ready: Python ${python.version} · MarkItDown ${installed}`;
     try {
       const body: unknown = (await requestUrl("https://pypi.org/pypi/markitdown/json")).json;
       if (!isRecord(body) || !isRecord(body.info) || typeof body.info.version !== "string") throw new Error("Invalid PyPI response");
       const latest = body.info.version;
-      return installed === latest ? `Installed: ${installed} (up to date)` : `Installed: ${installed} · Update available: ${latest}`;
+      text += installed === latest ? " · Up to date" : ` · Update available: ${latest}`;
     } catch {
-      return `Installed: ${installed} (could not check for updates)`;
+      text += " · Could not check for updates";
     }
+    return { ready: true, text };
   }
 
   async convertVaultFile(file: TFile, name = file.basename): Promise<void> {
+    await this.ensureReady(addonForFile(file.name));
     const adapter = this.app.vault.adapter;
     if (!(adapter instanceof FileSystemAdapter)) throw new Error("SourceDown requires a local vault.");
     await this.convert(adapter.getFullPath(file.path), noteName(name), file.parent?.path ?? "", file.path);
   }
 
   async convertExternalFile(file: File, name: string): Promise<void> {
+    await this.ensureReady(addonForFile(file.name));
     const source = webUtils.getPathForFile(file);
     if (!source) throw new Error("Obsidian did not provide a local path for this file.");
     await this.convert(source, noteName(name), this.settings.outputFolder, file.name);
   }
 
   async convertUrl(value: string, name: string): Promise<void> {
+    await this.ensureReady("youtube-transcription");
     const url = new URL(value);
     if (!["http:", "https:"].includes(url.protocol)) throw new Error("Enter an HTTP or HTTPS URL.");
     await this.convert(url.href, noteName(name), this.settings.outputFolder);
@@ -182,7 +215,25 @@ export default class SourceDownPlugin extends Plugin {
     try {
       await action();
     } catch (error) {
-      new Notice(error instanceof Error ? error.message : String(error), 8000);
+      if (error instanceof SetupError) new SetupModal(this.app, error.message, error.pythonMissing).open();
+      else new Notice(error instanceof Error ? error.message : String(error), 8000);
+    }
+  }
+
+  private async ensureReady(addonName: string | null = null): Promise<void> {
+    try {
+      await exec(this.executable, ["--version"], { timeout: 10_000 });
+    } catch {
+      const python = await this.detectPython();
+      throw new SetupError(
+        python
+          ? "MarkItDown is not installed. Open SourceDown settings and choose Install / update."
+          : "Python 3.10 or newer was not found. Install Python, then open SourceDown settings and install MarkItDown.",
+        !python,
+      );
+    }
+    if (addonName && isAddon(addonName) && !this.settings.installedAddons?.includes(addonName)) {
+      throw new SetupError(`${ADDONS[addonName]} is not installed. Enable it in SourceDown settings, then choose Install / update.`);
     }
   }
 
@@ -314,6 +365,27 @@ class NameModal extends Modal {
   }
 }
 
+class SetupModal extends Modal {
+  constructor(
+    app: App,
+    private message: string,
+    private pythonMissing: boolean,
+  ) {
+    super(app);
+  }
+
+  onOpen(): void {
+    this.contentEl.createEl("h2", { text: "SourceDown needs setup" });
+    this.contentEl.createEl("p", { text: this.message });
+    if (this.pythonMissing) {
+      this.contentEl.createEl("button", { text: "Get Python", cls: "mod-cta" }).addEventListener("click", () => {
+        void shell.openExternal("https://www.python.org/downloads/");
+      });
+    }
+    this.contentEl.createEl("p", { text: "Then open Settings → Community plugins → SourceDown." });
+  }
+}
+
 class SourceDownSettingTab extends PluginSettingTab {
   constructor(app: App, private plugin: SourceDownPlugin) {
     super(app, plugin);
@@ -322,6 +394,7 @@ class SourceDownSettingTab extends PluginSettingTab {
   display(): void {
     this.containerEl.empty();
     const status = new Setting(this.containerEl).setName("Status").setDesc("Checking…");
+    status.settingEl.addClass("sourcedown-status");
     status.addButton((button) => button.setButtonText("Refresh").onClick(() => void this.refreshStatus(status)));
     void this.refreshStatus(status);
     const installer = new Setting(this.containerEl).setName("Install or update MarkItDown");
@@ -376,7 +449,10 @@ class SourceDownSettingTab extends PluginSettingTab {
 
   private async refreshStatus(setting: Setting): Promise<void> {
     setting.setDesc("Checking…");
-    setting.setDesc(await this.plugin.status());
+    const status = await this.plugin.status();
+    setting.setDesc(status.text);
+    setting.settingEl.toggleClass("is-ready", status.ready);
+    setting.settingEl.toggleClass("needs-setup", !status.ready);
   }
 
   private updateAddonStatus(setting: Setting): void {

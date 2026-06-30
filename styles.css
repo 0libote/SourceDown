@@ -28,3 +28,18 @@
   margin-bottom: 14px;
   color: var(--text-muted);
 }
+
+.sourcedown-status {
+  padding: 14px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+}
+
+.sourcedown-status.is-ready {
+  border-color: var(--color-green);
+}
+
+.sourcedown-status.needs-setup {
+  border-color: var(--color-orange);
+  background: color-mix(in srgb, var(--color-orange) 8%, transparent);
+}

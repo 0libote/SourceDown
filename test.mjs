@@ -33,3 +33,12 @@ assert.deepEqual(Array.from(pythonCandidates("C:\\Python312\\python.exe", "win32
   "python",
   "python3",
 ]);
+
+const formatsSource = await readFile("src/formats.ts", "utf8");
+const formatsJs = ts.transpile(formatsSource, { module: ts.ModuleKind.CommonJS });
+const formatsModule = { exports: {} };
+vm.runInNewContext(formatsJs, { module: formatsModule, exports: formatsModule.exports });
+const { addonForFile } = formatsModule.exports;
+
+assert.equal(addonForFile("REPORT.PDF"), "pdf");
+assert.equal(addonForFile("notes.txt"), null);
