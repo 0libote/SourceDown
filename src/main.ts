@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, parse } from "node:path";
 import { promisify } from "node:util";
 import { shell, webUtils } from "electron";
@@ -14,6 +15,21 @@ class SetupError extends Error {
     super(message);
   }
 }
+
+const appDataRoot = (): string => {
+  if (process.platform === "win32") {
+    if (process.env.LOCALAPPDATA) return process.env.LOCALAPPDATA;
+    if (process.env.USERPROFILE) return join(process.env.USERPROFILE, "AppData", "Local");
+    throw new Error("Could not find a local app data folder. Set LOCALAPPDATA or USERPROFILE and try again.");
+  }
+  if (process.platform === "darwin") {
+    if (process.env.HOME) return join(process.env.HOME, "Library", "Application Support");
+    throw new Error("Could not find a local app data folder. Set HOME and try again.");
+  }
+  if (process.env.XDG_DATA_HOME) return process.env.XDG_DATA_HOME;
+  if (process.env.HOME) return join(process.env.HOME, ".local", "share");
+  throw new Error("Could not find a local app data folder. Set XDG_DATA_HOME or HOME and try again.");
+};
 
 const ADDONS = {
   "audio-transcription": "Audio transcription",
@@ -72,7 +88,7 @@ export default class SourceDownPlugin extends Plugin {
       pythonCommand: typeof saved.pythonCommand === "string" ? saved.pythonCommand : DEFAULT_SETTINGS.pythonCommand,
       outputFolder: typeof saved.outputFolder === "string" ? saved.outputFolder : DEFAULT_SETTINGS.outputFolder,
       addons,
-      installedAddons: readAddons(saved.installedAddons),
+      installedAddons: this.readSharedInstalledAddons() ?? readAddons(saved.installedAddons),
     };
     this.addRibbonIcon("file-down", "Open SourceDown", () => this.openConverter());
     this.addCommand({ id: "open-converter", name: "Open converter", callback: () => this.openConverter() });
@@ -94,35 +110,92 @@ export default class SourceDownPlugin extends Plugin {
     this.addSettingTab(new SourceDownSettingTab(this.app, this));
   }
 
-  private get pluginDirectory(): string {
-    const adapter = this.app.vault.adapter;
-    if (!(adapter instanceof FileSystemAdapter)) throw new Error("SourceDown requires a local vault.");
-    return adapter.getFullPath(`${this.app.vault.configDir}/plugins/${this.manifest.id}`);
+  private get appDirectory(): string {
+    return join(appDataRoot(), "SourceDown");
+  }
+
+  private get sharedStateFile(): string {
+    return join(this.appDirectory, "state.json");
+  }
+
+  private get venvDirectory(): string {
+    return join(this.appDirectory, ".venv");
+  }
+
+  private get venvPython(): string {
+    return join(
+      this.venvDirectory,
+      process.platform === "win32" ? "Scripts" : "bin",
+      process.platform === "win32" ? "python.exe" : "python",
+    );
   }
 
   private get executable(): string {
-    return join(this.pluginDirectory, ".venv", process.platform === "win32" ? "Scripts" : "bin", "markitdown");
+    return join(
+      this.venvDirectory,
+      process.platform === "win32" ? "Scripts" : "bin",
+      process.platform === "win32" ? "markitdown.exe" : "markitdown",
+    );
   }
 
   async installOrUpdate(progress: (message: string) => void): Promise<void> {
     progress("Looking for Python 3.10 or newer…");
     const python = await this.findPython();
-    progress("Creating the private environment…");
-    await exec(python, ["-m", "venv", "--clear", join(this.pluginDirectory, ".venv")], { timeout: 120_000 });
-    const venvPython = join(
-      this.pluginDirectory,
-      ".venv",
-      process.platform === "win32" ? "Scripts" : "bin",
-      process.platform === "win32" ? "python.exe" : "python",
-    );
+    progress("Creating or reusing the private environment…");
+    const rebuilt = await this.createOrUpdateVenv(python, progress);
     const addons = (Object.keys(ADDONS) as Addon[]).filter((addon) => this.settings.addons[addon]);
     const packageName = addons.length ? `markitdown[${addons.join(",")}]` : "markitdown";
     progress(`Installing MarkItDown and ${addons.length} add-on${addons.length === 1 ? "" : "s"}…`);
-    await exec(venvPython, ["-m", "pip", "install", "--upgrade", packageName], {
+    await exec(this.venvPython, ["-m", "pip", "install", "--upgrade", packageName], {
       maxBuffer: 20 * 1024 * 1024,
       timeout: 20 * 60_000,
     });
+    const installedAddons = rebuilt ? addons : Array.from(new Set([...(this.settings.installedAddons ?? []), ...addons]));
+    await this.setInstalledAddons(installedAddons);
+  }
+
+  private async createOrUpdateVenv(python: string, progress: (message: string) => void): Promise<boolean> {
+    const pyvenvConfig = join(this.venvDirectory, "pyvenv.cfg");
+    const create = async (): Promise<void> => {
+      await exec(python, ["-m", "venv", this.venvDirectory], { timeout: 120_000 });
+    };
+
+    if (!existsSync(this.venvDirectory)) {
+      await create();
+      return true;
+    }
+
+    if (!existsSync(pyvenvConfig)) {
+      progress("Existing environment is incomplete. Rebuilding it…");
+      rmSync(this.venvDirectory, { recursive: true, force: true });
+      await create();
+      return true;
+    }
+
+    try {
+      await exec(python, ["-m", "venv", "--upgrade", this.venvDirectory], { timeout: 120_000 });
+      return false;
+    } catch {
+      progress("Existing environment could not be updated. Rebuilding it…");
+      rmSync(this.venvDirectory, { recursive: true, force: true });
+      await create();
+      return true;
+    }
+  }
+
+  private readSharedInstalledAddons(): Addon[] | null {
+    try {
+      const state: unknown = JSON.parse(readFileSync(this.sharedStateFile, "utf8"));
+      return isRecord(state) ? readAddons(state.installedAddons) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async setInstalledAddons(addons: Addon[]): Promise<void> {
     this.settings.installedAddons = addons;
+    mkdirSync(this.appDirectory, { recursive: true });
+    writeFileSync(this.sharedStateFile, `${JSON.stringify({ installedAddons: addons }, null, 2)}\n`);
     await this.saveData(this.settings);
   }
 
@@ -158,7 +231,7 @@ export default class SourceDownPlugin extends Plugin {
 
   addonsChanged(): boolean {
     const selected = (Object.keys(ADDONS) as Addon[]).filter((addon) => this.settings.addons[addon]);
-    return this.settings.installedAddons === null || selected.join() !== this.settings.installedAddons.join();
+    return this.settings.installedAddons === null || selected.some((addon) => !this.settings.installedAddons?.includes(addon));
   }
 
   youtubeInstalled(): boolean {
