@@ -9,8 +9,9 @@ const module = { exports: {} };
 vm.runInNewContext(js, { module, exports: module.exports, Buffer });
 const { noteName, numberedPath, processMarkdown } = module.exports;
 
-const result = processMarkdown("Before\n\n![Chart](data:image/png;base64,aGVsbG8=)\n\nAfter", "/tmp/report.pdf", "report");
+const result = processMarkdown("Before\n\n![Chart](data:image/png;base64,aGVsbG8=)\n\nAfter", "/tmp/report.pdf", "report", "docling");
 assert.match(result.markdown, /^---\nsource: "\/tmp\/report\.pdf"/);
+assert.match(result.markdown, /conversion_engine: docling/);
 assert.match(result.markdown, /!\[Chart\]\(report-assets\/image-001\.png\)/);
 assert.equal(result.images[0].bytes.toString(), "hello");
 assert.equal(numberedPath("Imports", "report", 2), "Imports/report-2.md");
@@ -42,3 +43,13 @@ const { addonForFile } = formatsModule.exports;
 
 assert.equal(addonForFile("REPORT.PDF"), "pdf");
 assert.equal(addonForFile("notes.txt"), null);
+
+const enginesSource = await readFile("src/engines.ts", "utf8");
+const enginesJs = ts.transpile(enginesSource, { module: ts.ModuleKind.CommonJS });
+const enginesModule = { exports: {} };
+vm.runInNewContext(enginesJs, { module: enginesModule, exports: enginesModule.exports });
+const { recommendationForFile } = enginesModule.exports;
+
+assert.match(recommendationForFile("REPORT.PDF"), /Docling/);
+assert.match(recommendationForFile("scan.png"), /OCR/);
+assert.match(recommendationForFile("notes.txt"), /MarkItDown/);

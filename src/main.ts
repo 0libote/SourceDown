@@ -1,10 +1,12 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, parse } from "node:path";
 import { promisify } from "node:util";
 import { shell, webUtils } from "electron";
 import { App, FileSystemAdapter, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, normalizePath, requestUrl } from "obsidian";
 import { addonForFile } from "./formats";
+import { ConversionEngine, ENGINES, recommendationForFile } from "./engines";
 import { noteName, numberedPath, processMarkdown } from "./output";
 import { pythonCandidates } from "./python";
 
@@ -61,6 +63,8 @@ interface SourceDownSettings {
   outputFolder: string;
   addons: Record<Addon, boolean>;
   installedAddons: Addon[] | null;
+  engines: Record<ConversionEngine, boolean>;
+  installedEngines: ConversionEngine[] | null;
 }
 
 const DEFAULT_SETTINGS: SourceDownSettings = {
@@ -68,6 +72,8 @@ const DEFAULT_SETTINGS: SourceDownSettings = {
   outputFolder: "SourceDown",
   addons: Object.fromEntries(Object.keys(ADDONS).map((addon) => [addon, !addon.startsWith("az-") && addon !== "audio-transcription"])) as Record<Addon, boolean>,
   installedAddons: null,
+  engines: { markitdown: true, docling: false, marker: false },
+  installedEngines: null,
 };
 
 export default class SourceDownPlugin extends Plugin {
@@ -87,6 +93,12 @@ export default class SourceDownPlugin extends Plugin {
       outputFolder: typeof saved.outputFolder === "string" ? saved.outputFolder : DEFAULT_SETTINGS.outputFolder,
       addons,
       installedAddons: this.readSharedInstalledAddons() ?? readAddons(saved.installedAddons),
+      engines: {
+        markitdown: isRecord(saved.engines) && typeof saved.engines.markitdown === "boolean" ? saved.engines.markitdown : true,
+        docling: isRecord(saved.engines) && typeof saved.engines.docling === "boolean" ? saved.engines.docling : false,
+        marker: isRecord(saved.engines) && typeof saved.engines.marker === "boolean" ? saved.engines.marker : false,
+      },
+      installedEngines: this.readSharedInstalledEngines(),
     };
     this.addRibbonIcon("file-down", "Open SourceDown", () => this.openConverter());
     this.addCommand({ id: "open-converter", name: "Open converter", callback: () => this.openConverter() });
@@ -128,11 +140,11 @@ export default class SourceDownPlugin extends Plugin {
     );
   }
 
-  private get executable(): string {
+  private executable(engine: ConversionEngine): string {
     return join(
       this.venvDirectory,
       process.platform === "win32" ? "Scripts" : "bin",
-      process.platform === "win32" ? "markitdown.exe" : "markitdown",
+      process.platform === "win32" ? `${ENGINES[engine].executable}.exe` : ENGINES[engine].executable,
     );
   }
 
@@ -141,14 +153,18 @@ export default class SourceDownPlugin extends Plugin {
     const python = await this.findPython();
     progress("Creating or reusing the private environment…");
     const addons = (Object.keys(ADDONS) as Addon[]).filter((addon) => this.settings.addons[addon]);
-    await this.createOrUpdateVenv(python, progress, this.addonsChanged());
-    const packageName = addons.length ? `markitdown[${addons.join(",")}]` : "markitdown";
-    progress(`Installing MarkItDown and ${addons.length} add-on${addons.length === 1 ? "" : "s"}…`);
-    await exec(this.venvPython, ["-m", "pip", "install", "--upgrade", packageName], {
+    const engines = (Object.keys(ENGINES) as ConversionEngine[]).filter((engine) => this.settings.engines[engine]);
+    await this.createOrUpdateVenv(python, progress, this.selectionsChanged());
+    const packages = engines.map((engine) =>
+      engine === "markitdown" && addons.length ? `markitdown[${addons.join(",")}]` : ENGINES[engine].package,
+    );
+    if (!packages.length) throw new Error("Enable at least one conversion engine.");
+    progress(`Installing ${engines.map((engine) => ENGINES[engine].name).join(", ")}…`);
+    await exec(this.venvPython, ["-m", "pip", "install", "--upgrade", ...packages], {
       maxBuffer: 20 * 1024 * 1024,
       timeout: 20 * 60_000,
     });
-    await this.setInstalledAddons(addons);
+    await this.setInstalledSelections(addons, engines);
   }
 
   private async createOrUpdateVenv(python: string, progress: (message: string) => void, rebuild: boolean): Promise<void> {
@@ -194,10 +210,22 @@ export default class SourceDownPlugin extends Plugin {
     }
   }
 
-  private async setInstalledAddons(addons: Addon[]): Promise<void> {
+  private readSharedInstalledEngines(): ConversionEngine[] | null {
+    try {
+      const state: unknown = JSON.parse(readFileSync(this.sharedStateFile, "utf8"));
+      if (!isRecord(state) || !Array.isArray(state.installedEngines)) return null;
+      const engines = state.installedEngines.filter((engine): engine is ConversionEngine => typeof engine === "string" && engine in ENGINES);
+      return engines.length === state.installedEngines.length ? engines : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async setInstalledSelections(addons: Addon[], engines: ConversionEngine[]): Promise<void> {
     this.settings.installedAddons = addons;
+    this.settings.installedEngines = engines;
     mkdirSync(this.appDirectory, { recursive: true });
-    writeFileSync(this.sharedStateFile, `${JSON.stringify({ installedAddons: addons }, null, 2)}\n`);
+    writeFileSync(this.sharedStateFile, `${JSON.stringify({ installedAddons: addons, installedEngines: engines }, null, 2)}\n`);
     await this.saveData(this.settings);
   }
 
@@ -240,6 +268,13 @@ export default class SourceDownPlugin extends Plugin {
     );
   }
 
+  selectionsChanged(): boolean {
+    const selected = (Object.keys(ENGINES) as ConversionEngine[]).filter((engine) => this.settings.engines[engine]);
+    return this.addonsChanged() || this.settings.installedEngines === null ||
+      selected.length !== this.settings.installedEngines.length ||
+      selected.some((engine) => !this.settings.installedEngines?.includes(engine));
+  }
+
   youtubeInstalled(): boolean {
     return this.settings.installedAddons?.includes("youtube-transcription") === true;
   }
@@ -248,7 +283,7 @@ export default class SourceDownPlugin extends Plugin {
     const python = await this.detectPython();
     let installed: string | null = null;
     try {
-      const { stdout, stderr } = await exec(this.executable, ["--version"]);
+      const { stdout, stderr } = await exec(this.executable("markitdown"), ["--version"]);
       installed = `${stdout}${stderr}`.match(/\d+(?:\.\d+)+/)?.[0] ?? "unknown version";
     } catch {
       // Report setup state below.
@@ -268,22 +303,22 @@ export default class SourceDownPlugin extends Plugin {
     return { ready: true, text };
   }
 
-  async convertVaultFile(file: TFile, name = file.basename): Promise<void> {
-    await this.ensureReady(addonForFile(file.name));
+  async convertVaultFile(file: TFile, name = file.basename, engine: ConversionEngine = "markitdown"): Promise<void> {
+    await this.ensureReady(engine, addonForFile(file.name));
     const adapter = this.app.vault.adapter;
     if (!(adapter instanceof FileSystemAdapter)) throw new Error("SourceDown requires a local vault.");
-    await this.convert(adapter.getFullPath(file.path), noteName(name), file.parent?.path ?? "", file.path);
+    await this.convert(adapter.getFullPath(file.path), noteName(name), file.parent?.path ?? "", file.path, engine);
   }
 
-  async convertExternalFile(file: File, name: string): Promise<void> {
-    await this.ensureReady(addonForFile(file.name));
+  async convertExternalFile(file: File, name: string, engine: ConversionEngine): Promise<void> {
+    await this.ensureReady(engine, addonForFile(file.name));
     const source = webUtils.getPathForFile(file);
     if (!source) throw new Error("Obsidian did not provide a local path for this file.");
-    await this.convert(source, noteName(name), this.settings.outputFolder, file.name);
+    await this.convert(source, noteName(name), this.settings.outputFolder, file.name, engine);
   }
 
   async convertUrl(value: string, name: string): Promise<void> {
-    await this.ensureReady("youtube-transcription");
+    await this.ensureReady("markitdown", "youtube-transcription");
     const url = new URL(value);
     if (!["http:", "https:"].includes(url.protocol)) throw new Error("Enter an HTTP or HTTPS URL.");
     await this.convert(url.href, noteName(name), this.settings.outputFolder);
@@ -298,32 +333,32 @@ export default class SourceDownPlugin extends Plugin {
     }
   }
 
-  private async ensureReady(addonName: string | null = null): Promise<void> {
+  private async ensureReady(engine: ConversionEngine, addonName: string | null = null): Promise<void> {
     try {
-      await exec(this.executable, ["--version"], { timeout: 10_000 });
+      await exec(this.executable(engine), ["--help"], { timeout: 10_000 });
     } catch {
       const python = await this.detectPython();
       throw new SetupError(
         python
-          ? "MarkItDown is not installed. Open SourceDown settings and choose Install / update."
-          : "Python 3.10 or newer was not found. Install Python, then open SourceDown settings and install MarkItDown.",
+          ? `${ENGINES[engine].name} is not installed. Enable it in SourceDown settings and choose Install / update.`
+          : `Python 3.10 or newer was not found. Install Python, then open SourceDown settings and install ${ENGINES[engine].name}.`,
         !python,
       );
     }
-    if (addonName && isAddon(addonName) && !this.settings.installedAddons?.includes(addonName)) {
+    if (engine === "markitdown" && addonName && isAddon(addonName) && !this.settings.installedAddons?.includes(addonName)) {
       throw new SetupError(`${ADDONS[addonName]} is not installed. Enable it in SourceDown settings, then choose Install / update.`);
     }
   }
 
-  private async convert(source: string, name: string, folder: string, sourceLabel = source): Promise<void> {
+  private async convert(source: string, name: string, folder: string, sourceLabel = source, engine: ConversionEngine = "markitdown"): Promise<void> {
     let number = 1;
     while (await this.app.vault.adapter.exists(numberedPath(folder, name, number))) number++;
     const target = normalizePath(numberedPath(folder, name, number));
     const notice = new Notice(`Converting ${source.startsWith("http") ? source : parse(source).base}…`, 0);
     try {
-      const { stdout } = await exec(this.executable, ["--keep-data-uris", source], { maxBuffer: 100 * 1024 * 1024 });
+      const stdout = await this.convertToMarkdown(source, engine);
       await this.ensureFolder(folder);
-      const processed = processMarkdown(stdout, sourceLabel, parse(target).name);
+      const processed = processMarkdown(stdout, sourceLabel, parse(target).name, engine);
       for (const image of processed.images) {
         await this.ensureFolder(normalizePath(`${folder ? `${folder}/` : ""}${parse(image.path).dir}`));
         const bytes = image.bytes;
@@ -339,9 +374,29 @@ export default class SourceDownPlugin extends Plugin {
     } catch (error) {
       notice.hide();
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        throw new Error("MarkItDown is not installed. Install it from plugin settings.");
+        throw new Error(`${ENGINES[engine].name} is not installed. Install it from plugin settings.`);
       }
       throw error;
+    }
+  }
+
+  private async convertToMarkdown(source: string, engine: ConversionEngine): Promise<string> {
+    if (engine === "markitdown") {
+      return (await exec(this.executable(engine), ["--keep-data-uris", source], { maxBuffer: 100 * 1024 * 1024 })).stdout;
+    }
+    const output = mkdtempSync(join(tmpdir(), "sourcedown-"));
+    try {
+      const args = engine === "docling"
+        ? [source, "--to", "markdown", "--image-export-mode", "embedded", "--output", output]
+        : [source, "--output_dir", output, "--output_format", "markdown"];
+      await exec(this.executable(engine), args, { maxBuffer: 100 * 1024 * 1024 });
+      const markdown = readdirSync(output, { recursive: true })
+        .map(String)
+        .find((path) => path.toLowerCase().endsWith(".md"));
+      if (!markdown) throw new Error(`${ENGINES[engine].name} did not produce Markdown output.`);
+      return readFileSync(join(output, markdown), "utf8");
+    } finally {
+      rmSync(output, { recursive: true, force: true });
     }
   }
 
@@ -372,6 +427,14 @@ class ConvertModal extends Modal {
     const nameField = filePanel.createDiv("sourcedown-field");
     nameField.createEl("label", { text: "Note name", attr: { for: "sourcedown-name" } });
     const name = nameField.createEl("input", { type: "text", attr: { id: "sourcedown-name" } });
+    const engineField = filePanel.createDiv("sourcedown-field");
+    engineField.createEl("label", { text: "Converter", attr: { for: "sourcedown-engine" } });
+    const engine = engineField.createEl("select", { attr: { id: "sourcedown-engine" } });
+    for (const [value, details] of Object.entries(ENGINES) as Array<[ConversionEngine, (typeof ENGINES)[ConversionEngine]]>) {
+      engine.createEl("option", { value, text: details.name });
+    }
+    const helper = engineField.createEl("small");
+    const recommendation = engineField.createEl("small");
     const destination = filePanel.createEl("small", { cls: "sourcedown-destination" });
     const convert = filePanel.createEl("button", { text: "Convert file", cls: "mod-cta" });
     convert.disabled = true;
@@ -380,17 +443,24 @@ class ConvertModal extends Modal {
       convert.disabled = !input.files?.[0] || !name.value.trim();
       destination.setText(`Creates: ${this.plugin.settings.outputFolder ? `${this.plugin.settings.outputFolder}/` : ""}${name.value || "…"}.md`);
     };
+    const updateEngineHelp = (): void => {
+      helper.setText(ENGINES[engine.value as ConversionEngine].helper);
+      recommendation.setText(input.files?.[0] ? recommendationForFile(input.files[0].name) : "MarkItDown is recommended for most files.");
+    };
     input.addEventListener("change", () => {
       const file = input.files?.[0];
       if (file) name.value = parse(file.name).name;
       updateDestination();
+      updateEngineHelp();
     });
     name.addEventListener("input", updateDestination);
     convert.addEventListener("click", () => {
       const file = input.files?.[0];
-      if (file) void this.plugin.run(() => this.plugin.convertExternalFile(file, name.value));
+      if (file) void this.plugin.run(() => this.plugin.convertExternalFile(file, name.value, engine.value as ConversionEngine));
     });
+    engine.addEventListener("change", updateEngineHelp);
     updateDestination();
+    updateEngineHelp();
 
     if (this.plugin.youtubeInstalled()) {
       const selector = this.contentEl.createDiv("sourcedown-selector");
@@ -485,7 +555,7 @@ class SourceDownSettingTab extends PluginSettingTab {
     status.settingEl.addClass("sourcedown-status");
     status.addButton((button) => button.setButtonText("Refresh").onClick(() => void this.refreshStatus(status)));
     void this.refreshStatus(status);
-    const installer = new Setting(this.containerEl).setName("Install or update MarkItDown");
+    const installer = new Setting(this.containerEl).setName("Install or update conversion engines");
     installer.addButton((button) =>
       button.setButtonText("Install / update").setCta().onClick(async () => {
         button.setDisabled(true).setButtonText("Installing…");
@@ -494,7 +564,7 @@ class SourceDownSettingTab extends PluginSettingTab {
             installer.setDesc(message);
           });
           installer.setDesc("Installation complete.");
-          new Notice("MarkItDown installed.");
+          new Notice("Conversion engines installed.");
           await this.refreshStatus(status);
           this.updateAddonStatus(addonStatus);
         } catch (error) {
@@ -522,6 +592,16 @@ class SourceDownSettingTab extends PluginSettingTab {
         await this.plugin.saveData(this.plugin.settings);
       }),
     );
+    new Setting(this.containerEl).setName("Conversion engines").setHeading();
+    for (const [engine, details] of Object.entries(ENGINES) as Array<[ConversionEngine, (typeof ENGINES)[ConversionEngine]]>) {
+      new Setting(this.containerEl).setName(details.name).setDesc(details.description).addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.engines[engine]).onChange(async (value) => {
+          this.plugin.settings.engines[engine] = value;
+          await this.plugin.saveData(this.plugin.settings);
+          this.updateAddonStatus(addonStatus);
+        }),
+      );
+    }
     const addonStatus = new Setting(this.containerEl).setName("Add-ons");
     this.updateAddonStatus(addonStatus);
     for (const [addon, label] of Object.entries(ADDONS) as Array<[Addon, string]>) {
@@ -544,6 +624,6 @@ class SourceDownSettingTab extends PluginSettingTab {
   }
 
   private updateAddonStatus(setting: Setting): void {
-    setting.setDesc(this.plugin.addonsChanged() ? "Install or update MarkItDown to apply these selections." : "Installed selections are up to date.");
+    setting.setDesc(this.plugin.selectionsChanged() ? "Install or update to apply these selections." : "Installed selections are up to date.");
   }
 }

@@ -1,3 +1,5 @@
+import type { ConversionEngine } from "./engines";
+
 const IMAGE_TYPES: Record<string, string> = {
   png: "png",
   jpeg: "jpg",
@@ -8,7 +10,7 @@ const IMAGE_TYPES: Record<string, string> = {
   webp: "webp",
 };
 
-export function processMarkdown(markdown: string, source: string, noteName: string): {
+export function processMarkdown(markdown: string, source: string, noteName: string, engine: ConversionEngine = "markitdown"): {
   markdown: string;
   images: Array<{ path: string; bytes: Buffer }>;
 } {
@@ -25,7 +27,7 @@ export function processMarkdown(markdown: string, source: string, noteName: stri
       return `![${alt}](${path})`;
     },
   );
-  const frontmatter = `---\nsource: ${JSON.stringify(source)}\nconverted: ${JSON.stringify(new Date().toISOString())}\nconverter: sourcedown\n---\n\n`;
+  const frontmatter = `---\nsource: ${JSON.stringify(source)}\nconverted: ${JSON.stringify(new Date().toISOString())}\nconverter: sourcedown\nconversion_engine: ${engine}\n---\n\n`;
   return { markdown: `${frontmatter}${body.trim()}\n`, images };
 }
 
