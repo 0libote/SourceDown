@@ -24,6 +24,20 @@ export const ENGINES = {
 
 export type ConversionEngine = keyof typeof ENGINES;
 
+export function readEngines(value: unknown): ConversionEngine[] | null {
+  if (!Array.isArray(value)) return null;
+  const engines = value.filter((engine): engine is ConversionEngine => typeof engine === "string" && engine in ENGINES);
+  return engines.length === value.length ? engines : null;
+}
+
+export function markdownOutputFor(paths: string[], sourceStem: string): string | null {
+  const markdown = paths.filter((path) => path.toLowerCase().endsWith(".md")).sort();
+  const expected = `${sourceStem}.md`.toLowerCase();
+  const match = markdown.find((path) => path.split(/[\\/]/).pop()?.toLowerCase() === expected);
+  if (match || markdown.length < 2) return match ?? markdown[0] ?? null;
+  throw new Error(`Multiple Markdown outputs produced: ${markdown.join(", ")}`);
+}
+
 export function recommendationForFile(name: string): string {
   const extension = name.split(".").pop()?.toLowerCase();
   if (extension === "pdf") return "PDF: MarkItDown is a good default; try Docling for layout, tables, columns, scans, OCR, or images; try Marker for equations, forms, tables, images, or technical documents.";

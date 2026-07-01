@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { shell, webUtils } from "electron";
 import { App, FileSystemAdapter, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, normalizePath, requestUrl } from "obsidian";
 import { addonForFile } from "./formats";
-import { ConversionEngine, ENGINES, recommendationForFile } from "./engines";
+import { ConversionEngine, ENGINES, markdownOutputFor, readEngines, recommendationForFile } from "./engines";
 import { noteName, numberedPath, processMarkdown } from "./output";
 import { pythonCandidates } from "./python";
 
@@ -98,7 +98,7 @@ export default class SourceDownPlugin extends Plugin {
         docling: isRecord(saved.engines) && typeof saved.engines.docling === "boolean" ? saved.engines.docling : false,
         marker: isRecord(saved.engines) && typeof saved.engines.marker === "boolean" ? saved.engines.marker : false,
       },
-      installedEngines: this.readSharedInstalledEngines(),
+      installedEngines: this.readSharedInstalledEngines() ?? readEngines(saved.installedEngines),
     };
     this.addRibbonIcon("file-down", "Open SourceDown", () => this.openConverter());
     this.addCommand({ id: "open-converter", name: "Open converter", callback: () => this.openConverter() });
@@ -154,11 +154,11 @@ export default class SourceDownPlugin extends Plugin {
     progress("Creating or reusing the private environment…");
     const addons = (Object.keys(ADDONS) as Addon[]).filter((addon) => this.settings.addons[addon]);
     const engines = (Object.keys(ENGINES) as ConversionEngine[]).filter((engine) => this.settings.engines[engine]);
+    if (!engines.length) throw new Error("Enable at least one conversion engine.");
     await this.createOrUpdateVenv(python, progress, this.selectionsChanged());
     const packages = engines.map((engine) =>
       engine === "markitdown" && addons.length ? `markitdown[${addons.join(",")}]` : ENGINES[engine].package,
     );
-    if (!packages.length) throw new Error("Enable at least one conversion engine.");
     progress(`Installing ${engines.map((engine) => ENGINES[engine].name).join(", ")}…`);
     await exec(this.venvPython, ["-m", "pip", "install", "--upgrade", ...packages], {
       maxBuffer: 20 * 1024 * 1024,
@@ -213,9 +213,7 @@ export default class SourceDownPlugin extends Plugin {
   private readSharedInstalledEngines(): ConversionEngine[] | null {
     try {
       const state: unknown = JSON.parse(readFileSync(this.sharedStateFile, "utf8"));
-      if (!isRecord(state) || !Array.isArray(state.installedEngines)) return null;
-      const engines = state.installedEngines.filter((engine): engine is ConversionEngine => typeof engine === "string" && engine in ENGINES);
-      return engines.length === state.installedEngines.length ? engines : null;
+      return isRecord(state) ? readEngines(state.installedEngines) : null;
     } catch {
       return null;
     }
@@ -281,22 +279,33 @@ export default class SourceDownPlugin extends Plugin {
 
   async status(): Promise<{ ready: boolean; text: string }> {
     const python = await this.detectPython();
-    let installed: string | null = null;
-    try {
-      const { stdout, stderr } = await exec(this.executable("markitdown"), ["--version"]);
-      installed = `${stdout}${stderr}`.match(/\d+(?:\.\d+)+/)?.[0] ?? "unknown version";
-    } catch {
-      // Report setup state below.
+    const selected = (Object.keys(ENGINES) as ConversionEngine[]).filter((engine) => this.settings.engines[engine]);
+    if (!selected.length) return { ready: false, text: "Setup required: enable at least one conversion engine." };
+    const installed: ConversionEngine[] = [];
+    let markitdownVersion: string | null = null;
+    for (const engine of selected) {
+      try {
+        const { stdout, stderr } = await exec(this.executable(engine), [engine === "markitdown" ? "--version" : "--help"]);
+        installed.push(engine);
+        if (engine === "markitdown") markitdownVersion = `${stdout}${stderr}`.match(/\d+(?:\.\d+)+/)?.[0] ?? "unknown version";
+      } catch {
+        // Missing engines are reported below.
+      }
     }
-    if (!python && !installed) return { ready: false, text: "Setup required: Python 3.10+ was not found. Use Get Python below, then install MarkItDown." };
-    if (!installed) return { ready: false, text: `Setup required: Python ${python?.version} is ready, but MarkItDown is not installed.` };
-    if (!python) return { ready: false, text: `MarkItDown ${installed} is installed. Python 3.10+ is needed for installs and updates.` };
-    let text = `Ready: Python ${python.version} · MarkItDown ${installed}`;
+    const missing = selected.filter((engine) => !installed.includes(engine));
+    if (!python && !installed.length) return { ready: false, text: "Setup required: Python 3.10+ and the selected conversion engines were not found." };
+    if (missing.length) return { ready: false, text: `Setup required: ${missing.map((engine) => ENGINES[engine].name).join(", ")} ${missing.length === 1 ? "is" : "are"} not installed.` };
+    const engineNames = installed.map((engine) =>
+      engine === "markitdown" ? `MarkItDown ${markitdownVersion}` : ENGINES[engine].name,
+    ).join(", ");
+    if (!python) return { ready: false, text: `${engineNames} installed. Python 3.10+ is needed for installs and updates.` };
+    let text = `Ready: Python ${python.version} · ${engineNames}`;
+    if (!markitdownVersion) return { ready: true, text };
     try {
       const body: unknown = (await requestUrl("https://pypi.org/pypi/markitdown/json")).json;
       if (!isRecord(body) || !isRecord(body.info) || typeof body.info.version !== "string") throw new Error("Invalid PyPI response");
       const latest = body.info.version;
-      text += installed === latest ? " · Up to date" : ` · Update available: ${latest}`;
+      text += markitdownVersion === latest ? " · Up to date" : ` · MarkItDown update available: ${latest}`;
     } catch {
       text += " · Could not check for updates";
     }
@@ -390,9 +399,7 @@ export default class SourceDownPlugin extends Plugin {
         ? [source, "--to", "markdown", "--image-export-mode", "embedded", "--output", output]
         : [source, "--output_dir", output, "--output_format", "markdown"];
       await exec(this.executable(engine), args, { maxBuffer: 100 * 1024 * 1024 });
-      const markdown = readdirSync(output, { recursive: true })
-        .map(String)
-        .find((path) => path.toLowerCase().endsWith(".md"));
+      const markdown = markdownOutputFor(readdirSync(output, { recursive: true }).map(String), parse(source).name);
       if (!markdown) throw new Error(`${ENGINES[engine].name} did not produce Markdown output.`);
       return readFileSync(join(output, markdown), "utf8");
     } finally {
@@ -569,7 +576,7 @@ class SourceDownSettingTab extends PluginSettingTab {
           this.updateAddonStatus(addonStatus);
         } catch (error) {
           installer.setDesc(error instanceof Error ? error.message : String(error));
-          new Notice("MarkItDown installation failed. See settings for details.", 8000);
+          new Notice("Conversion engine installation failed. See settings for details.", 8000);
         } finally {
           button.setDisabled(false).setButtonText("Install / update");
         }

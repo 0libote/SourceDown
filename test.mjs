@@ -48,8 +48,13 @@ const enginesSource = await readFile("src/engines.ts", "utf8");
 const enginesJs = ts.transpile(enginesSource, { module: ts.ModuleKind.CommonJS });
 const enginesModule = { exports: {} };
 vm.runInNewContext(enginesJs, { module: enginesModule, exports: enginesModule.exports });
-const { recommendationForFile } = enginesModule.exports;
+const { markdownOutputFor, readEngines, recommendationForFile } = enginesModule.exports;
 
 assert.match(recommendationForFile("REPORT.PDF"), /Docling/);
 assert.match(recommendationForFile("scan.png"), /OCR/);
 assert.match(recommendationForFile("notes.txt"), /MarkItDown/);
+assert.deepEqual(Array.from(readEngines(["markitdown", "docling"])), ["markitdown", "docling"]);
+assert.equal(readEngines(["unknown"]), null);
+assert.equal(markdownOutputFor(["assets/readme.md", "report/report.md"], "report"), "report/report.md");
+assert.equal(markdownOutputFor(["only.md"], "report"), "only.md");
+assert.throws(() => markdownOutputFor(["one.md", "two.md"], "report"), /Multiple Markdown outputs/);
