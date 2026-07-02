@@ -17,7 +17,7 @@ export const ENGINES = {
     name: "Marker",
     description: "Optional advanced converter for PDFs, images, Office files, HTML, EPUB, tables, forms, equations, and technical documents.",
     helper: "Try for PDFs, images, Office files, HTML, EPUB, equations, forms, tables, extracted images, or technical documents.",
-    package: "marker-pdf[full]",
+    package: "marker-pdf",
     executable: "marker_single",
   },
 } as const;
