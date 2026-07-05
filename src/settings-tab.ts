@@ -35,28 +35,37 @@ export class SourceDownSettingTab extends PluginSettingTab {
         .setName(engine === "markitdown" ? "MarkItDown (recommended)" : details.name)
         .setDesc(details.description)
         .addToggle((toggle) =>
-          toggle.setValue(this.plugin.settings.engines[engine]).onChange(async (value) => {
-            this.plugin.settings.engines[engine] = value;
-            await this.plugin.saveData(this.plugin.settings);
-            this.updateInstallState(installer);
+          toggle.setValue(this.plugin.settings.engines[engine]).onChange((value) => {
+            void (async () => {
+              this.plugin.settings.engines[engine] = value;
+              await this.plugin.saveData(this.plugin.settings);
+              this.updateInstallState(installer);
+            })();
           }),
         );
     }
     installer.settingEl.addClass("sourcedown-install");
     installer.addButton((button) =>
-      button.setButtonText("Apply changes").setCta().onClick(async () => {
+      button.setButtonText("Apply changes").setCta().onClick(() => {
         button.setDisabled(true).setButtonText("Installing…");
-        try {
-          await this.plugin.installOrUpdate((message) => installer.setDesc(message));
-          new Notice("Converter selection applied.");
-          await this.refreshStatus(status);
-          this.updateInstallState(installer);
-        } catch (error) {
-          installer.setDesc(error instanceof Error ? error.message : String(error));
-          new Notice("Conversion engine installation failed. See settings for details.", 8000);
-        } finally {
-          button.setDisabled(false).setButtonText("Apply changes");
-        }
+        void this.plugin
+          .installOrUpdate((message) => {
+            installer.setDesc(message);
+          })
+          .then(() => {
+            new Notice("Converter selection applied.");
+            return this.refreshStatus(status);
+          })
+          .then(() => {
+            this.updateInstallState(installer);
+          })
+          .catch((error) => {
+            installer.setDesc(error instanceof Error ? error.message : String(error));
+            new Notice("Conversion engine installation failed. See settings for details.", 8000);
+          })
+          .finally(() => {
+            button.setDisabled(false).setButtonText("Apply changes");
+          });
       }),
     );
     this.containerEl.append(installer.settingEl, status.settingEl);
@@ -68,9 +77,11 @@ export class SourceDownSettingTab extends PluginSettingTab {
     advanced.createEl("summary", { text: "Advanced settings" });
     const advancedContent = advanced.createDiv();
     new Setting(advancedContent).setName("Python command").setDesc("Usually no change is needed. SourceDown automatically finds Python 3.10 or newer.").addText((text) =>
-      text.setValue(this.plugin.settings.pythonCommand).onChange(async (value) => {
-        this.plugin.settings.pythonCommand = value.trim();
-        await this.plugin.saveData(this.plugin.settings);
+      text.setValue(this.plugin.settings.pythonCommand).onChange((value) => {
+        void (async () => {
+          this.plugin.settings.pythonCommand = value.trim();
+          await this.plugin.saveData(this.plugin.settings);
+        })();
       }),
     ).addButton((button) =>
       button.setButtonText("Get Python").onClick(() => {
@@ -82,10 +93,12 @@ export class SourceDownSettingTab extends PluginSettingTab {
       .setDesc("PDF, DOCX, PPTX, and XLSX are enabled by default. Other formats are opt-in. Apply changes after editing.");
     for (const [addon, label] of Object.entries(ADDONS) as Array<[Addon, string]>) {
       new Setting(advancedContent).setName(label).addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.addons[addon]).onChange(async (value) => {
-          this.plugin.settings.addons[addon] = value;
-          await this.plugin.saveData(this.plugin.settings);
-          this.updateInstallState(installer);
+        toggle.setValue(this.plugin.settings.addons[addon]).onChange((value) => {
+          void (async () => {
+            this.plugin.settings.addons[addon] = value;
+            await this.plugin.saveData(this.plugin.settings);
+            this.updateInstallState(installer);
+          })();
         }),
       );
     }

@@ -155,7 +155,7 @@ export class Installer {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       if (Date.now() - statSync(path).mtimeMs < 25 * 60_000) {
-        throw new Error("Another SourceDown vault is applying converter changes. Wait for it to finish, then try again.");
+        throw new Error("Another SourceDown vault is applying converter changes. Wait for it to finish, then try again.", { cause: error });
       }
       rmSync(path, { recursive: true, force: true });
       mkdirSync(path);

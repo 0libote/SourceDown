@@ -61,7 +61,7 @@ function runToFile(command: string, args: string[], path: string): Promise<void>
           closeFailure = error instanceof Error ? error : new Error(String(error));
         }
       }
-      if (failure || closeFailure) reject(failure ?? closeFailure);
+      if (failure || closeFailure) reject(failure ?? closeFailure ?? new Error("Conversion failed."));
       else if (code) reject(new Error(stderr.trim() || `Converter exited with code ${code}.`));
       else resolve();
     });
@@ -204,8 +204,8 @@ export default class SourceDownPlugin extends Plugin {
         const path = normalizePath(`${folder ? `${folder}/` : ""}${image.path}`);
         await this.app.vault.createBinary(path, Uint8Array.from(image.bytes).buffer);
       }
-      const file = this.app.vault.getFileByPath(target);
-      if (!file) throw new Error(`Could not open created note: ${target}`);
+      const file = this.app.vault.getAbstractFileByPath(target);
+      if (!(file instanceof TFile)) throw new Error(`Could not open created note: ${target}`);
       await this.app.workspace.getLeaf(false).openFile(file);
       notice.setMessage(`Created ${target}`);
       window.setTimeout(() => notice.hide(), 4000);
@@ -214,17 +214,17 @@ export default class SourceDownPlugin extends Plugin {
       if (target) {
         const assets = this.app.vault.getAbstractFileByPath(target.replace(/\.md$/i, "-assets"));
         if (assets) await this.app.vault.delete(assets, true);
-        const file = this.app.vault.getFileByPath(target);
-        if (file) await this.app.vault.delete(file);
+        const file = this.app.vault.getAbstractFileByPath(target);
+        if (file instanceof TFile) await this.app.vault.delete(file);
       }
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        throw new Error(`${ENGINES[engine].name} is not installed. Install it from plugin settings.`);
+        throw new Error(`${ENGINES[engine].name} is not installed. Install it from plugin settings.`, { cause: error });
       }
       if ((error instanceof Error && "killed" in error && error.killed) || (error as NodeJS.ErrnoException).code === "ETIMEDOUT") {
-        throw new Error(`${ENGINES[engine].name} timed out after 10 minutes. Try a smaller file or another converter.`);
+        throw new Error(`${ENGINES[engine].name} timed out after 10 minutes. Try a smaller file or another converter.`, { cause: error });
       }
       if ((error as NodeJS.ErrnoException).code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
-        throw new Error(`${ENGINES[engine].name} produced more than 100 MB of output. Try a smaller file or another converter.`);
+        throw new Error(`${ENGINES[engine].name} produced more than 100 MB of output. Try a smaller file or another converter.`, { cause: error });
       }
       throw error;
     }
@@ -325,17 +325,19 @@ class ConvertModal extends Modal {
       updateEngineHelp();
     });
     name.addEventListener("input", updateDestination);
-    convert.addEventListener("click", async () => {
-      const file = input.files?.[0];
-      if (!file || convertingFile) return;
-      convertingFile = true;
-      updateDestination();
-      try {
-        await this.plugin.run(() => this.plugin.convertExternalFile(file, name.value, engine.value as ConversionEngine));
-      } finally {
-        convertingFile = false;
+    convert.addEventListener("click", () => {
+      void (async () => {
+        const file = input.files?.[0];
+        if (!file || convertingFile) return;
+        convertingFile = true;
         updateDestination();
-      }
+        try {
+          await this.plugin.run(() => this.plugin.convertExternalFile(file, name.value, engine.value as ConversionEngine));
+        } finally {
+          convertingFile = false;
+          updateDestination();
+        }
+      })();
     });
     engine.addEventListener("change", updateEngineHelp);
     updateDestination();
@@ -369,7 +371,8 @@ class ConvertModal extends Modal {
       urlError.setText(urlTouched ? error ?? "" : "");
       urlDestination.setText(destinationPreview(this.plugin.settings.outputFolder, urlName.value));
     };
-    convertUrl.addEventListener("click", async () => {
+    convertUrl.addEventListener("click", () => {
+      void (async () => {
       if (convertingUrl) return;
       convertingUrl = true;
       updateUrlDestination();
@@ -379,6 +382,7 @@ class ConvertModal extends Modal {
         convertingUrl = false;
         updateUrlDestination();
       }
+      })();
     });
     url.addEventListener("input", () => {
       urlTouched = true;
@@ -423,11 +427,13 @@ class NameModal extends Modal {
       convert.disabled = Boolean(message);
       return message;
     };
-    convert.addEventListener("click", async () => {
+    convert.addEventListener("click", () => {
+      void (async () => {
       if (validate()) return;
       convert.disabled = true;
       if (await this.submit(input.value)) this.close();
       else validate();
+      })();
     });
     input.addEventListener("input", validate);
     input.addEventListener("keydown", (event) => {
