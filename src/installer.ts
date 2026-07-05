@@ -137,6 +137,10 @@ export class Installer {
     if (missing.length) return { ready: false, text: `Setup required: ${missing.map((engine) => ENGINES[engine].name).join(", ")} ${missing.length === 1 ? "is" : "are"} not installed.` };
     const names = selected.map((engine) => `${ENGINES[engine].name} ${versions.get(engine)}`).join(", ");
     if (!python) return { ready: false, text: `${names} installed. Python 3.10+ is needed for installs and updates.` };
+    const outdated = selected.filter((engine) => versions.get(engine) !== ENGINES[engine].package.split("==")[1]);
+    if (outdated.length) {
+      return { ready: false, text: `${names} installed. Apply changes to update ${outdated.map((engine) => ENGINES[engine].name).join(", ")}.` };
+    }
     return { ready: true, text: `Ready: Python ${python.version} · ${names}` };
   }
 

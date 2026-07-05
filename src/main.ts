@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { clipboard, shell, webUtils } from "electron";
 import { App, FileSystemAdapter, Modal, Notice, Plugin, TFile, normalizePath } from "obsidian";
 import { addonForFile, parseImportUrl } from "./formats";
-import { ConversionEngine, ENGINES, markdownOutputFor, packageFor, readEngines, recommendationForFile } from "./engines";
+import { ConversionEngine, ENGINES, markdownOutputFor, recommendationForFile } from "./engines";
 import { noteName, noteNameError, numberedPath, processMarkdown } from "./output";
 import { Installer, SetupError } from "./installer";
 import { ADDONS, DEFAULT_SETTINGS, type Addon, type SourceDownSettings, isAddon, loadSettings } from "./settings";
