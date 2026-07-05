@@ -9,7 +9,7 @@ import { addonForFile, parseImportUrl } from "./formats";
 import { ConversionEngine, ENGINES, markdownOutputFor, recommendationForFile } from "./engines";
 import { noteName, noteNameError, numberedPath, processMarkdown } from "./output";
 import { Installer, SetupError } from "./installer";
-import { ADDONS, DEFAULT_SETTINGS, type Addon, type SourceDownSettings, isAddon, loadSettings } from "./settings";
+import { ADDONS, DEFAULT_SETTINGS, type SourceDownSettings, isAddon, loadSettings } from "./settings";
 import { SourceDownSettingTab } from "./settings-tab";
 
 const exec = promisify(execFile);
@@ -68,6 +68,11 @@ function runToFile(command: string, args: string[], path: string): Promise<void>
   });
 }
 
+function destinationPreview(folder: string, name: string): string {
+  const baseName = name.trim().replace(/\.md$/i, "") || "…";
+  return `Creates: ${numberedPath(folder, baseName, 1)} (duplicates may become ${numberedPath(folder, baseName, 2)})`;
+}
+
 export default class SourceDownPlugin extends Plugin {
   settings: SourceDownSettings = DEFAULT_SETTINGS;
   readonly installer = new Installer(this);
@@ -85,8 +90,11 @@ export default class SourceDownPlugin extends Plugin {
             .setTitle("Convert to Markdown")
             .setIcon("file-down")
             .onClick(() =>
-              new NameModal(this.app, file.basename, `The note will be created beside ${file.name}.`, (name) =>
-                this.run(() => this.convertVaultFile(file, name)),
+              new NameModal(
+                this.app,
+                file.basename,
+                `The note will be created beside ${file.name}. Duplicate names may be numbered.`,
+                (name) => this.run(() => this.convertVaultFile(file, name)),
               ).open(),
             ),
         );
@@ -141,7 +149,8 @@ export default class SourceDownPlugin extends Plugin {
       return true;
     } catch (error) {
       if (error instanceof SetupError) new SetupModal(this.app, error.message, error.pythonMissing).open();
-      else new Notice(error instanceof Error ? error.message : String(error), 8000);
+      else if (error instanceof Error) new ConversionErrorModal(this.app, error.message, error.stack ?? error.message).open();
+      else new Notice(String(error), 8000);
       return false;
     }
   }
@@ -302,7 +311,7 @@ class ConvertModal extends Modal {
       const error = noteNameError(name.value);
       convert.disabled = convertingFile || !availableEngines.length || !input.files?.[0] || Boolean(error);
       nameError.setText(error ?? "");
-      destination.setText(`Creates: ${this.plugin.settings.outputFolder ? `${this.plugin.settings.outputFolder}/` : ""}${name.value || "…"}.md`);
+      destination.setText(destinationPreview(this.plugin.settings.outputFolder, name.value));
     };
     const updateEngineHelp = (): void => {
       const selected = ENGINES[engine.value as ConversionEngine];
@@ -358,9 +367,7 @@ class ConvertModal extends Modal {
       }
       convertUrl.disabled = convertingUrl || Boolean(error);
       urlError.setText(urlTouched ? error ?? "" : "");
-      urlDestination.setText(
-        `Creates: ${this.plugin.settings.outputFolder ? `${this.plugin.settings.outputFolder}/` : ""}${urlName.value || "…"}.md`,
-      );
+      urlDestination.setText(destinationPreview(this.plugin.settings.outputFolder, urlName.value));
     };
     convertUrl.addEventListener("click", async () => {
       if (convertingUrl) return;
@@ -444,7 +451,7 @@ class SetupModal extends Modal {
   onOpen(): void {
     this.contentEl.createEl("h2", { text: "SourceDown needs setup" });
     this.contentEl.createEl("p", { text: this.message });
-    this.contentEl.createEl("button", { text: "Copy error" }).addEventListener("click", () => {
+    this.contentEl.createEl("button", { text: "Copy details" }).addEventListener("click", () => {
       clipboard.writeText(this.message);
     });
     if (this.pythonMissing) {
@@ -453,5 +460,23 @@ class SetupModal extends Modal {
       });
     }
     this.contentEl.createEl("p", { text: "Then open Settings → Community plugins → SourceDown." });
+  }
+}
+
+class ConversionErrorModal extends Modal {
+  constructor(
+    app: App,
+    private message: string,
+    private details: string,
+  ) {
+    super(app);
+  }
+
+  onOpen(): void {
+    this.contentEl.createEl("h2", { text: "Conversion failed" });
+    this.contentEl.createEl("p", { text: this.message });
+    this.contentEl.createEl("button", { text: "Copy details", cls: "mod-cta" }).addEventListener("click", () => {
+      clipboard.writeText(this.details);
+    });
   }
 }
