@@ -9,6 +9,7 @@ import { addonForFile, parseImportUrl } from "./formats";
 import { ConversionEngine, ENGINES, markdownOutputFor, packageFor, readEngines, recommendationForFile } from "./engines";
 import { noteName, numberedPath, processMarkdown } from "./output";
 import { pythonCandidates } from "./python";
+import { ADDONS, DEFAULT_SETTINGS, type Addon, type SourceDownSettings, isAddon, isRecord, loadSettings, readAddons } from "./settings";
 
 const exec = promisify(execFile);
 const CONVERSION_TIMEOUT = 10 * 60_000;
@@ -87,73 +88,13 @@ const appDataRoot = (): string => {
   throw new Error("Could not find a local app data folder. Set XDG_DATA_HOME or HOME and try again.");
 };
 
-const ADDONS = {
-  "audio-transcription": "Audio transcription",
-  docx: "Word (DOCX)",
-  outlook: "Outlook messages",
-  pdf: "PDF",
-  pptx: "PowerPoint (PPTX)",
-  xls: "Excel (XLS)",
-  xlsx: "Excel (XLSX)",
-  "youtube-transcription": "YouTube transcription",
-} as const;
-
-type Addon = keyof typeof ADDONS;
-
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
-const isAddon = (value: unknown): value is Addon => typeof value === "string" && value in ADDONS;
-const readAddons = (value: unknown): Addon[] | null => {
-  if (!Array.isArray(value)) return null;
-  const addons: Addon[] = [];
-  for (const item of value as unknown[]) {
-    if (!isAddon(item)) return null;
-    addons.push(item);
-  }
-  return addons;
-};
-
-interface SourceDownSettings {
-  pythonCommand: string;
-  outputFolder: string;
-  addons: Record<Addon, boolean>;
-  installedAddons: Addon[] | null;
-  engines: Record<ConversionEngine, boolean>;
-  installedEngines: ConversionEngine[] | null;
-}
-
-const DEFAULT_SETTINGS: SourceDownSettings = {
-  pythonCommand: "python3",
-  outputFolder: "SourceDown",
-  addons: Object.fromEntries(Object.keys(ADDONS).map((addon) => [addon, !addon.startsWith("az-") && addon !== "audio-transcription"])) as Record<Addon, boolean>,
-  installedAddons: null,
-  engines: { markitdown: true, docling: false, marker: false },
-  installedEngines: null,
-};
-
 export default class SourceDownPlugin extends Plugin {
   settings: SourceDownSettings = DEFAULT_SETTINGS;
 
   async onload(): Promise<void> {
-    const loaded: unknown = await this.loadData();
-    const saved = isRecord(loaded) ? loaded : {};
-    const addons = { ...DEFAULT_SETTINGS.addons };
-    if (isRecord(saved.addons)) {
-      for (const addon of Object.keys(ADDONS) as Addon[]) {
-        if (typeof saved.addons[addon] === "boolean") addons[addon] = saved.addons[addon];
-      }
-    }
-    this.settings = {
-      pythonCommand: typeof saved.pythonCommand === "string" ? saved.pythonCommand : DEFAULT_SETTINGS.pythonCommand,
-      outputFolder: typeof saved.outputFolder === "string" ? saved.outputFolder : DEFAULT_SETTINGS.outputFolder,
-      addons,
-      installedAddons: this.readSharedInstalledAddons() ?? readAddons(saved.installedAddons),
-      engines: {
-        markitdown: isRecord(saved.engines) && typeof saved.engines.markitdown === "boolean" ? saved.engines.markitdown : true,
-        docling: isRecord(saved.engines) && typeof saved.engines.docling === "boolean" ? saved.engines.docling : false,
-        marker: isRecord(saved.engines) && typeof saved.engines.marker === "boolean" ? saved.engines.marker : false,
-      },
-      installedEngines: this.readSharedInstalledEngines() ?? readEngines(saved.installedEngines),
-    };
+    this.settings = await loadSettings(this);
+    this.settings.installedAddons = this.readSharedInstalledAddons() ?? this.settings.installedAddons;
+    this.settings.installedEngines = this.readSharedInstalledEngines() ?? this.settings.installedEngines;
     this.addRibbonIcon("file-down", "Open SourceDown", () => this.openConverter());
     this.addCommand({ id: "open-converter", name: "Open converter", callback: () => this.openConverter() });
     this.registerEvent(
