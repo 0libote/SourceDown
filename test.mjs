@@ -72,3 +72,50 @@ assert.equal(markdownOutputFor(["only.md"], "report"), "only.md");
 assert.throws(() => markdownOutputFor(["one.md", "two.md"], "report"), /Multiple Markdown outputs/);
 assert.equal(packageFor("markitdown", ["pdf", "docx"]), "markitdown[pdf,docx]==0.1.6");
 assert.equal(packageFor("docling"), "docling==2.108.0");
+
+const settingsSource = await readFile("src/settings.ts", "utf8");
+const settingsJs = ts.transpile(settingsSource, { module: ts.ModuleKind.CommonJS });
+const settingsModule = { exports: {} };
+vm.runInNewContext(settingsJs, {
+  module: settingsModule,
+  exports: settingsModule.exports,
+  require: (id) => {
+    assert.equal(id, "./engines");
+    return enginesModule.exports;
+  },
+  Object,
+});
+const { ADDONS, DEFAULT_SETTINGS, settingsFromData } = settingsModule.exports;
+assert.deepEqual(
+  Object.keys(ADDONS).filter((addon) => DEFAULT_SETTINGS.addons[addon]),
+  ["docx", "pdf", "pptx", "xlsx"],
+);
+const migrated = settingsFromData({
+  pythonCommand: "python3.12",
+  addons: { pdf: false, outlook: true, unknown: true },
+  engines: { markitdown: false, docling: true },
+  installedAddons: ["pdf"],
+});
+assert.equal(migrated.pythonCommand, "python3.12");
+assert.equal(migrated.addons.pdf, false);
+assert.equal(migrated.addons.outlook, true);
+assert.equal(migrated.addons.docx, true);
+assert.deepEqual(Array.from(migrated.installedAddons), ["pdf"]);
+assert.deepEqual({ ...migrated.engines }, { markitdown: false, docling: true, marker: false });
+
+const stateSource = await readFile("src/install-state.ts", "utf8");
+const stateJs = ts.transpile(stateSource, { module: ts.ModuleKind.CommonJS });
+const stateModule = { exports: {} };
+vm.runInNewContext(stateJs, { module: stateModule, exports: stateModule.exports });
+const { selectionsChanged, SUPPORTED_PYTHON_CHECK } = stateModule.exports;
+const applied = {
+  ...DEFAULT_SETTINGS,
+  installedAddons: ["pdf"],
+  installedEngines: ["markitdown"],
+};
+assert.equal(selectionsChanged(applied, ["pdf"], ["markitdown"]), false);
+assert.equal(selectionsChanged(applied, ["pdf", "docx"], ["markitdown"]), true);
+assert.deepEqual(Array.from(SUPPORTED_PYTHON_CHECK), [
+  "-c",
+  "import sys; assert sys.version_info >= (3, 10)",
+]);

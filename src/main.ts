@@ -153,13 +153,13 @@ export default class SourceDownPlugin extends Plugin {
       const python = await this.installer.detectPython();
       throw new SetupError(
         python
-          ? `${ENGINES[engine].name} is not installed. Enable it in SourceDown settings and choose Install / update.`
+          ? `${ENGINES[engine].name} is not installed. Enable it in SourceDown settings and choose Apply changes.`
           : `Python 3.10 or newer was not found. Install Python, then open SourceDown settings and install ${ENGINES[engine].name}.`,
         !python,
       );
     }
     if (engine === "markitdown" && addonName && isAddon(addonName) && !this.settings.installedAddons?.includes(addonName)) {
-      throw new SetupError(`${ADDONS[addonName]} is not installed. Enable it in SourceDown settings, then choose Install / update.`);
+      throw new SetupError(`${ADDONS[addonName]} is not installed. Enable it in SourceDown settings, then choose Apply changes.`);
     }
   }
 
@@ -346,6 +346,7 @@ class ConvertModal extends Modal {
     const urlError = linkPanel.createEl("small", { cls: "sourcedown-error" });
     const urlDestination = linkPanel.createEl("small", { cls: "sourcedown-destination" });
     let convertingUrl = false;
+    let urlTouched = false;
     const updateUrlDestination = (): void => {
       let error = noteNameError(urlName.value);
       if (!error) {
@@ -356,7 +357,7 @@ class ConvertModal extends Modal {
         }
       }
       convertUrl.disabled = convertingUrl || Boolean(error);
-      urlError.setText(error ?? "");
+      urlError.setText(urlTouched ? error ?? "" : "");
       urlDestination.setText(
         `Creates: ${this.plugin.settings.outputFolder ? `${this.plugin.settings.outputFolder}/` : ""}${urlName.value || "…"}.md`,
       );
@@ -372,7 +373,14 @@ class ConvertModal extends Modal {
         updateUrlDestination();
       }
     });
-    url.addEventListener("input", updateUrlDestination);
+    url.addEventListener("input", () => {
+      urlTouched = true;
+      updateUrlDestination();
+    });
+    url.addEventListener("blur", () => {
+      urlTouched = true;
+      updateUrlDestination();
+    });
     urlName.addEventListener("input", updateUrlDestination);
     updateUrlDestination();
     const show = (link: boolean): void => {

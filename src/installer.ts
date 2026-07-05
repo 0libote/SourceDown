@@ -6,6 +6,7 @@ import type SourceDownPlugin from "./main";
 import { type ConversionEngine, ENGINES, packageFor, readEngines } from "./engines";
 import { pythonCandidates } from "./python";
 import { type Addon, ADDONS, isRecord, readAddons } from "./settings";
+import { selectionsChanged, SUPPORTED_PYTHON_CHECK } from "./install-state";
 
 const exec = promisify(execFile);
 
@@ -112,10 +113,7 @@ export class Installer {
   selectionsChanged(): boolean {
     const addons = (Object.keys(ADDONS) as Addon[]).filter((addon) => this.plugin.settings.addons[addon]);
     const engines = (Object.keys(ENGINES) as ConversionEngine[]).filter((engine) => this.plugin.settings.engines[engine]);
-    return this.plugin.settings.installedAddons === null ||
-      addons.some((addon) => !this.plugin.settings.installedAddons?.includes(addon)) ||
-      this.plugin.settings.installedEngines === null ||
-      engines.some((engine) => !this.plugin.settings.installedEngines?.includes(engine));
+    return selectionsChanged(this.plugin.settings, addons, engines);
   }
 
   async status(): Promise<{ ready: boolean; text: string }> {
@@ -141,6 +139,11 @@ export class Installer {
     if (outdated.length) {
       return { ready: false, text: `${names} installed. Apply changes to update ${outdated.map((engine) => ENGINES[engine].name).join(", ")}.` };
     }
+    const selectedAddons = (Object.keys(ADDONS) as Addon[]).filter((addon) => this.plugin.settings.addons[addon]);
+    const unappliedAddons = selectedAddons.filter((addon) => !this.plugin.settings.installedAddons?.includes(addon));
+    if (this.plugin.settings.engines.markitdown && unappliedAddons.length) {
+      return { ready: false, text: `${names} installed. Apply changes to add ${unappliedAddons.map((addon) => ADDONS[addon]).join(", ")}.` };
+    }
     return { ready: true, text: `Ready: Python ${python.version} · ${names}` };
   }
 
@@ -162,7 +165,7 @@ export class Installer {
 
   private async findPython(): Promise<string> {
     const found = await this.detectPython();
-    if (!found) throw new SetupError("Python 3.10 or newer was not found. Install Python, then click Install / update again.", true);
+    if (!found) throw new SetupError("Python 3.10 or newer was not found. Install Python, then click Apply changes again.", true);
     this.plugin.settings.pythonCommand = found.command;
     await this.plugin.saveData(this.plugin.settings);
     return found.command;
@@ -174,9 +177,9 @@ export class Installer {
       return;
     }
     try {
-      await exec(this.venvPython, ["--version"], { timeout: 10_000 });
+      await exec(this.venvPython, [...SUPPORTED_PYTHON_CHECK], { timeout: 10_000 });
     } catch {
-      progress("Existing environment is incomplete. Rebuilding it…");
+      progress("Existing environment is unsupported or incomplete. Rebuilding it…");
       rmSync(this.venvDirectory, { recursive: true, force: true });
       await exec(python, ["-m", "venv", this.venvDirectory], { timeout: 120_000 });
     }

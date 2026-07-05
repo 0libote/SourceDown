@@ -92,6 +92,7 @@ export class SourceDownSettingTab extends PluginSettingTab {
   }
 
   private async refreshStatus(setting: Setting): Promise<void> {
+    setting.setDesc("Checking locally…");
     const status = await this.plugin.status();
     setting.setDesc(status.text);
     setting.settingEl.toggleClass("is-ready", status.ready);

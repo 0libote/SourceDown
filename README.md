@@ -21,7 +21,7 @@ SourceDown is available from the [Obsidian Community plugins marketplace](https:
 
 1. Open **Settings → Community plugins → Browse**.
 2. Search for **SourceDown**, then choose **Install** and **Enable**.
-3. Open **SourceDown settings** and choose **Install / update**.
+3. Open **SourceDown settings** and choose **Apply changes**.
 
 SourceDown requires Obsidian 1.5 or newer, the desktop app, and Python 3.10 or newer.
 

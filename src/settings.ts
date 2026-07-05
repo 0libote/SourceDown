@@ -42,8 +42,7 @@ export function readAddons(value: unknown): Addon[] | null {
   return value;
 }
 
-export async function loadSettings(plugin: SourceDownPlugin): Promise<SourceDownSettings> {
-  const loaded: unknown = await plugin.loadData();
+export function settingsFromData(loaded: unknown): SourceDownSettings {
   const saved = isRecord(loaded) ? loaded : {};
   const addons = { ...DEFAULT_SETTINGS.addons };
   if (isRecord(saved.addons)) {
@@ -63,4 +62,8 @@ export async function loadSettings(plugin: SourceDownPlugin): Promise<SourceDown
     },
     installedEngines: readEngines(saved.installedEngines),
   };
+}
+
+export async function loadSettings(plugin: SourceDownPlugin): Promise<SourceDownSettings> {
+  return settingsFromData(await plugin.loadData());
 }
