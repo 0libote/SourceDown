@@ -76,3 +76,27 @@
   border-color: var(--color-orange);
   background: color-mix(in srgb, var(--color-orange) 8%, transparent);
 }
+
+.sourcedown-install {
+  margin: 12px 0 20px;
+  padding: 14px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  background: var(--background-secondary);
+}
+
+.sourcedown-install.has-changes {
+  border-color: var(--color-orange);
+}
+
+.sourcedown-advanced {
+  margin-top: 24px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.sourcedown-advanced summary {
+  padding: 16px 0;
+  color: var(--text-muted);
+  font-weight: var(--font-semibold);
+  cursor: pointer;
+}

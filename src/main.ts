@@ -149,12 +149,12 @@ export default class SourceDownPlugin extends Plugin {
   }
 
   async installOrUpdate(progress: (message: string) => void): Promise<void> {
+    const engines = (Object.keys(ENGINES) as ConversionEngine[]).filter((engine) => this.settings.engines[engine]);
+    if (!engines.length) throw new Error("Enable at least one conversion engine.");
     progress("Looking for Python 3.10 or newer…");
     const python = await this.findPython();
     progress("Creating or reusing the private environment…");
     const addons = (Object.keys(ADDONS) as Addon[]).filter((addon) => this.settings.addons[addon]);
-    const engines = (Object.keys(ENGINES) as ConversionEngine[]).filter((engine) => this.settings.engines[engine]);
-    if (!engines.length) throw new Error("Enable at least one conversion engine.");
     await this.createOrUpdateVenv(python, progress, this.selectionsChanged());
     const packages = engines.map((engine) =>
       engine === "markitdown" && addons.length ? `markitdown[${addons.join(",")}]` : ENGINES[engine].package,
@@ -275,6 +275,10 @@ export default class SourceDownPlugin extends Plugin {
 
   youtubeInstalled(): boolean {
     return this.settings.installedAddons?.includes("youtube-transcription") === true;
+  }
+
+  conversionEngines(): ConversionEngine[] {
+    return (this.settings.installedEngines ?? ["markitdown"]).filter((engine) => this.settings.engines[engine]);
   }
 
   async status(): Promise<{ ready: boolean; text: string }> {
@@ -437,8 +441,13 @@ class ConvertModal extends Modal {
     const engineField = filePanel.createDiv("sourcedown-field");
     engineField.createEl("label", { text: "Converter", attr: { for: "sourcedown-engine" } });
     const engine = engineField.createEl("select", { attr: { id: "sourcedown-engine" } });
-    for (const [value, details] of Object.entries(ENGINES) as Array<[ConversionEngine, (typeof ENGINES)[ConversionEngine]]>) {
-      engine.createEl("option", { value, text: details.name });
+    const availableEngines = this.plugin.conversionEngines();
+    for (const value of availableEngines) {
+      engine.createEl("option", { value, text: ENGINES[value].name });
+    }
+    if (!availableEngines.length) {
+      engine.createEl("option", { text: "Set up a converter in settings" });
+      engine.disabled = true;
     }
     const helper = engineField.createEl("small");
     const recommendation = engineField.createEl("small");
@@ -447,11 +456,12 @@ class ConvertModal extends Modal {
     convert.disabled = true;
 
     const updateDestination = (): void => {
-      convert.disabled = !input.files?.[0] || !name.value.trim();
+      convert.disabled = !availableEngines.length || !input.files?.[0] || !name.value.trim();
       destination.setText(`Creates: ${this.plugin.settings.outputFolder ? `${this.plugin.settings.outputFolder}/` : ""}${name.value || "…"}.md`);
     };
     const updateEngineHelp = (): void => {
-      helper.setText(ENGINES[engine.value as ConversionEngine].helper);
+      const selected = ENGINES[engine.value as ConversionEngine];
+      helper.setText(selected?.helper ?? "Open SourceDown settings, choose a converter, and apply the selection.");
       recommendation.setText(input.files?.[0] ? recommendationForFile(input.files[0].name) : "MarkItDown is recommended for most files.");
     };
     input.addEventListener("change", () => {
@@ -542,6 +552,9 @@ class SetupModal extends Modal {
   onOpen(): void {
     this.contentEl.createEl("h2", { text: "SourceDown needs setup" });
     this.contentEl.createEl("p", { text: this.message });
+    this.contentEl.createEl("button", { text: "Copy error" }).addEventListener("click", () => {
+      void navigator.clipboard.writeText(this.message);
+    });
     if (this.pythonMissing) {
       this.contentEl.createEl("button", { text: "Get Python", cls: "mod-cta" }).addEventListener("click", () => {
         void shell.openExternal("https://www.python.org/downloads/");
@@ -558,65 +571,78 @@ class SourceDownSettingTab extends PluginSettingTab {
 
   display(): void {
     this.containerEl.empty();
-    const status = new Setting(this.containerEl).setName("Status").setDesc("Checking…");
-    status.settingEl.addClass("sourcedown-status");
-    status.addButton((button) => button.setButtonText("Refresh").onClick(() => void this.refreshStatus(status)));
-    void this.refreshStatus(status);
-    const installer = new Setting(this.containerEl).setName("Install or update conversion engines");
+    new Setting(this.containerEl).setName("General").setHeading();
+    new Setting(this.containerEl).setName("Output folder").setDesc("Converted notes from the SourceDown panel are saved here.").addText((text) =>
+      text.setPlaceholder("Vault root").setValue(this.plugin.settings.outputFolder).onChange(async (value) => {
+        this.plugin.settings.outputFolder = normalizePath(value).split("/").filter((part) => part && part !== "." && part !== "..").join("/");
+        await this.plugin.saveData(this.plugin.settings);
+      }),
+    );
+
+    new Setting(this.containerEl).setName("Conversion engines").setHeading();
+    this.containerEl.createEl("p", {
+      text: "Choose the converters you want available, then apply the selection. MarkItDown is the simplest default.",
+      cls: "setting-item-description",
+    });
+    for (const [engine, details] of Object.entries(ENGINES) as Array<[ConversionEngine, (typeof ENGINES)[ConversionEngine]]>) {
+      new Setting(this.containerEl)
+        .setName(engine === "markitdown" ? "MarkItDown (recommended)" : details.name)
+        .setDesc(details.description)
+        .addToggle((toggle) =>
+          toggle.setValue(this.plugin.settings.engines[engine]).onChange(async (value) => {
+            this.plugin.settings.engines[engine] = value;
+            await this.plugin.saveData(this.plugin.settings);
+            this.updateInstallState(installer);
+          }),
+        );
+    }
+    const installer = new Setting(this.containerEl).setName("Apply converter selection");
+    installer.settingEl.addClass("sourcedown-install");
     installer.addButton((button) =>
-      button.setButtonText("Install / update").setCta().onClick(async () => {
+      button.setButtonText("Apply changes").setCta().onClick(async () => {
         button.setDisabled(true).setButtonText("Installing…");
         try {
           await this.plugin.installOrUpdate((message) => {
             installer.setDesc(message);
           });
-          installer.setDesc("Installation complete.");
-          new Notice("Conversion engines installed.");
+          new Notice("Converter selection applied.");
           await this.refreshStatus(status);
-          this.updateAddonStatus(addonStatus);
+          this.updateInstallState(installer);
         } catch (error) {
           installer.setDesc(error instanceof Error ? error.message : String(error));
           new Notice("Conversion engine installation failed. See settings for details.", 8000);
         } finally {
-          button.setDisabled(false).setButtonText("Install / update");
+          button.setDisabled(false).setButtonText("Apply changes");
         }
       }),
     );
-    installer.addButton((button) =>
-      button.setButtonText("Get Python").onClick(() => {
-        void shell.openExternal("https://www.python.org/downloads/");
-      }),
-    );
-    new Setting(this.containerEl).setName("Python command").addText((text) =>
+    this.updateInstallState(installer);
+
+    const status = new Setting(this.containerEl).setName("Installed converters").setDesc("Checking…");
+    status.settingEl.addClass("sourcedown-status");
+    status.addButton((button) => button.setButtonText("Refresh").onClick(() => void this.refreshStatus(status)));
+    void this.refreshStatus(status);
+
+    const advanced = this.containerEl.createEl("details", { cls: "sourcedown-advanced" });
+    advanced.createEl("summary", { text: "Advanced settings" });
+    const advancedContent = advanced.createDiv();
+    new Setting(advancedContent).setName("Python command").setDesc("Usually no change is needed. SourceDown automatically finds Python 3.10 or newer.").addText((text) =>
       text.setValue(this.plugin.settings.pythonCommand).onChange(async (value) => {
         this.plugin.settings.pythonCommand = value.trim();
         await this.plugin.saveData(this.plugin.settings);
       }),
-    );
-    new Setting(this.containerEl).setName("Output folder").addText((text) =>
-      text.setValue(this.plugin.settings.outputFolder).onChange(async (value) => {
-        this.plugin.settings.outputFolder = normalizePath(value).split("/").filter((part) => part && part !== "." && part !== "..").join("/");
-        await this.plugin.saveData(this.plugin.settings);
+    ).addButton((button) =>
+      button.setButtonText("Get Python").onClick(() => {
+        void shell.openExternal("https://www.python.org/downloads/");
       }),
     );
-    new Setting(this.containerEl).setName("Conversion engines").setHeading();
-    for (const [engine, details] of Object.entries(ENGINES) as Array<[ConversionEngine, (typeof ENGINES)[ConversionEngine]]>) {
-      new Setting(this.containerEl).setName(details.name).setDesc(details.description).addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.engines[engine]).onChange(async (value) => {
-          this.plugin.settings.engines[engine] = value;
-          await this.plugin.saveData(this.plugin.settings);
-          this.updateAddonStatus(addonStatus);
-        }),
-      );
-    }
-    const addonStatus = new Setting(this.containerEl).setName("Add-ons");
-    this.updateAddonStatus(addonStatus);
+    new Setting(advancedContent).setName("MarkItDown format support").setDesc("Optional packages used only by MarkItDown. Apply converter selection after changing these.");
     for (const [addon, label] of Object.entries(ADDONS) as Array<[Addon, string]>) {
-      new Setting(this.containerEl).setName(label).addToggle((toggle) =>
+      new Setting(advancedContent).setName(label).addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.addons[addon]).onChange(async (value) => {
           this.plugin.settings.addons[addon] = value;
           await this.plugin.saveData(this.plugin.settings);
-          this.updateAddonStatus(addonStatus);
+          this.updateInstallState(installer);
         }),
       );
     }
@@ -630,7 +656,17 @@ class SourceDownSettingTab extends PluginSettingTab {
     setting.settingEl.toggleClass("needs-setup", !status.ready);
   }
 
-  private updateAddonStatus(setting: Setting): void {
-    setting.setDesc(this.plugin.selectionsChanged() ? "Install or update to apply these selections." : "Installed selections are up to date.");
+  private updateInstallState(setting: Setting): void {
+    const selected = (Object.keys(ENGINES) as ConversionEngine[])
+      .filter((engine) => this.plugin.settings.engines[engine])
+      .map((engine) => ENGINES[engine].name);
+    setting.setDesc(
+      !selected.length
+        ? "Choose at least one converter."
+        : this.plugin.selectionsChanged()
+          ? `Not applied: ${selected.join(", ")}.`
+          : `Ready: ${selected.join(", ")}.`,
+    );
+    setting.settingEl.toggleClass("has-changes", this.plugin.selectionsChanged());
   }
 }
