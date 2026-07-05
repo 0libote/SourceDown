@@ -38,17 +38,25 @@ assert.deepEqual(Array.from(pythonCandidates("C:\\Python312\\python.exe", "win32
 const formatsSource = await readFile("src/formats.ts", "utf8");
 const formatsJs = ts.transpile(formatsSource, { module: ts.ModuleKind.CommonJS });
 const formatsModule = { exports: {} };
-vm.runInNewContext(formatsJs, { module: formatsModule, exports: formatsModule.exports });
-const { addonForFile } = formatsModule.exports;
+vm.runInNewContext(formatsJs, { module: formatsModule, exports: formatsModule.exports, URL });
+const { addonForFile, parseImportUrl } = formatsModule.exports;
 
 assert.equal(addonForFile("REPORT.PDF"), "pdf");
 assert.equal(addonForFile("notes.txt"), null);
+assert.deepEqual({ ...parseImportUrl(" https://example.com/page ") }, { href: "https://example.com/page", youtube: false });
+assert.equal(parseImportUrl("https://youtu.be/abc").youtube, true);
+assert.equal(parseImportUrl("https://m.youtube.com/watch?v=abc").youtube, true);
+assert.equal(parseImportUrl("https://music.youtube.com/watch?v=abc").youtube, true);
+assert.equal(parseImportUrl("https://www.youtube-nocookie.com/embed/abc").youtube, true);
+assert.equal(parseImportUrl("https://youtube.com.evil.example/watch").youtube, false);
+assert.throws(() => parseImportUrl("example.com"), /valid web address/);
+assert.throws(() => parseImportUrl("file:///tmp/report"), /HTTP or HTTPS/);
 
 const enginesSource = await readFile("src/engines.ts", "utf8");
 const enginesJs = ts.transpile(enginesSource, { module: ts.ModuleKind.CommonJS });
 const enginesModule = { exports: {} };
 vm.runInNewContext(enginesJs, { module: enginesModule, exports: enginesModule.exports });
-const { markdownOutputFor, readEngines, recommendationForFile } = enginesModule.exports;
+const { markdownOutputFor, packageFor, readEngines, recommendationForFile } = enginesModule.exports;
 
 assert.match(recommendationForFile("REPORT.PDF"), /Docling/);
 assert.match(recommendationForFile("scan.png"), /OCR/);
@@ -58,3 +66,5 @@ assert.equal(readEngines(["unknown"]), null);
 assert.equal(markdownOutputFor(["assets/readme.md", "report/report.md"], "report"), "report/report.md");
 assert.equal(markdownOutputFor(["only.md"], "report"), "only.md");
 assert.throws(() => markdownOutputFor(["one.md", "two.md"], "report"), /Multiple Markdown outputs/);
+assert.equal(packageFor("markitdown", ["pdf", "docx"]), "markitdown[pdf,docx]==0.1.6");
+assert.equal(packageFor("docling"), "docling==2.108.0");

@@ -3,26 +3,33 @@ export const ENGINES = {
     name: "MarkItDown",
     description: "Default general converter.",
     helper: "Best default for general file conversion.",
-    package: "markitdown",
+    package: "markitdown==0.1.6",
     executable: "markitdown",
   },
   docling: {
     name: "Docling",
     description: "Optional multi-format converter with strong PDF layout, OCR, tables, images, Office, email, EPUB, audio, and structured export support.",
     helper: "Try for complex PDFs, scanned documents, tables, images, Office files, emails, EPUB, audio, or when structured output may help.",
-    package: "docling",
+    package: "docling==2.108.0",
     executable: "docling",
   },
   marker: {
     name: "Marker",
     description: "Optional advanced converter for PDFs, images, Office files, HTML, EPUB, tables, forms, equations, and technical documents.",
     helper: "Try for PDFs, images, Office files, HTML, EPUB, equations, forms, tables, extracted images, or technical documents.",
-    package: "marker-pdf",
+    package: "marker-pdf==1.10.2",
     executable: "marker_single",
   },
 } as const;
 
 export type ConversionEngine = keyof typeof ENGINES;
+
+export function packageFor(engine: ConversionEngine, addons: string[] = []): string {
+  const spec = ENGINES[engine].package;
+  if (engine !== "markitdown" || !addons.length) return spec;
+  const version = spec.indexOf("==");
+  return `${spec.slice(0, version)}[${addons.join(",")}]${spec.slice(version)}`;
+}
 
 export function readEngines(value: unknown): ConversionEngine[] | null {
   if (!Array.isArray(value)) return null;
