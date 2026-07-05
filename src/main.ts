@@ -1,14 +1,16 @@
 import { execFile, spawn } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, parse } from "node:path";
 import { promisify } from "node:util";
 import { clipboard, shell, webUtils } from "electron";
-import { App, FileSystemAdapter, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, normalizePath } from "obsidian";
+import { App, FileSystemAdapter, Modal, Notice, Plugin, TFile, normalizePath } from "obsidian";
 import { addonForFile, parseImportUrl } from "./formats";
-import { ConversionEngine, ENGINES, markdownOutputFor, packageFor, readEngines, recommendationForFile } from "./engines";
-import { noteName, numberedPath, processMarkdown } from "./output";
-import { pythonCandidates } from "./python";
+import { ConversionEngine, ENGINES, markdownOutputFor, recommendationForFile } from "./engines";
+import { noteName, noteNameError, numberedPath, processMarkdown } from "./output";
+import { Installer, SetupError } from "./installer";
+import { ADDONS, DEFAULT_SETTINGS, type Addon, type SourceDownSettings, isAddon, loadSettings } from "./settings";
+import { SourceDownSettingTab } from "./settings-tab";
 
 const exec = promisify(execFile);
 const CONVERSION_TIMEOUT = 10 * 60_000;
@@ -66,94 +68,13 @@ function runToFile(command: string, args: string[], path: string): Promise<void>
   });
 }
 
-class SetupError extends Error {
-  constructor(message: string, readonly pythonMissing = false) {
-    super(message);
-  }
-}
-
-const appDataRoot = (): string => {
-  if (process.platform === "win32") {
-    if (process.env.LOCALAPPDATA) return process.env.LOCALAPPDATA;
-    if (process.env.USERPROFILE) return join(process.env.USERPROFILE, "AppData", "Local");
-    throw new Error("Could not find a local app data folder. Set LOCALAPPDATA or USERPROFILE and try again.");
-  }
-  if (process.platform === "darwin") {
-    if (process.env.HOME) return join(process.env.HOME, "Library", "Application Support");
-    throw new Error("Could not find a local app data folder. Set HOME and try again.");
-  }
-  if (process.env.XDG_DATA_HOME) return process.env.XDG_DATA_HOME;
-  if (process.env.HOME) return join(process.env.HOME, ".local", "share");
-  throw new Error("Could not find a local app data folder. Set XDG_DATA_HOME or HOME and try again.");
-};
-
-const ADDONS = {
-  "audio-transcription": "Audio transcription",
-  docx: "Word (DOCX)",
-  outlook: "Outlook messages",
-  pdf: "PDF",
-  pptx: "PowerPoint (PPTX)",
-  xls: "Excel (XLS)",
-  xlsx: "Excel (XLSX)",
-  "youtube-transcription": "YouTube transcription",
-} as const;
-
-type Addon = keyof typeof ADDONS;
-
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
-const isAddon = (value: unknown): value is Addon => typeof value === "string" && value in ADDONS;
-const readAddons = (value: unknown): Addon[] | null => {
-  if (!Array.isArray(value)) return null;
-  const addons: Addon[] = [];
-  for (const item of value as unknown[]) {
-    if (!isAddon(item)) return null;
-    addons.push(item);
-  }
-  return addons;
-};
-
-interface SourceDownSettings {
-  pythonCommand: string;
-  outputFolder: string;
-  addons: Record<Addon, boolean>;
-  installedAddons: Addon[] | null;
-  engines: Record<ConversionEngine, boolean>;
-  installedEngines: ConversionEngine[] | null;
-}
-
-const DEFAULT_SETTINGS: SourceDownSettings = {
-  pythonCommand: "python3",
-  outputFolder: "SourceDown",
-  addons: Object.fromEntries(Object.keys(ADDONS).map((addon) => [addon, !addon.startsWith("az-") && addon !== "audio-transcription"])) as Record<Addon, boolean>,
-  installedAddons: null,
-  engines: { markitdown: true, docling: false, marker: false },
-  installedEngines: null,
-};
-
 export default class SourceDownPlugin extends Plugin {
   settings: SourceDownSettings = DEFAULT_SETTINGS;
+  readonly installer = new Installer(this);
 
   async onload(): Promise<void> {
-    const loaded: unknown = await this.loadData();
-    const saved = isRecord(loaded) ? loaded : {};
-    const addons = { ...DEFAULT_SETTINGS.addons };
-    if (isRecord(saved.addons)) {
-      for (const addon of Object.keys(ADDONS) as Addon[]) {
-        if (typeof saved.addons[addon] === "boolean") addons[addon] = saved.addons[addon];
-      }
-    }
-    this.settings = {
-      pythonCommand: typeof saved.pythonCommand === "string" ? saved.pythonCommand : DEFAULT_SETTINGS.pythonCommand,
-      outputFolder: typeof saved.outputFolder === "string" ? saved.outputFolder : DEFAULT_SETTINGS.outputFolder,
-      addons,
-      installedAddons: this.readSharedInstalledAddons() ?? readAddons(saved.installedAddons),
-      engines: {
-        markitdown: isRecord(saved.engines) && typeof saved.engines.markitdown === "boolean" ? saved.engines.markitdown : true,
-        docling: isRecord(saved.engines) && typeof saved.engines.docling === "boolean" ? saved.engines.docling : false,
-        marker: isRecord(saved.engines) && typeof saved.engines.marker === "boolean" ? saved.engines.marker : false,
-      },
-      installedEngines: this.readSharedInstalledEngines() ?? readEngines(saved.installedEngines),
-    };
+    this.settings = await loadSettings(this);
+    this.installer.loadSharedSelections();
     this.addRibbonIcon("file-down", "Open SourceDown", () => this.openConverter());
     this.addCommand({ id: "open-converter", name: "Open converter", callback: () => this.openConverter() });
     this.registerEvent(
@@ -174,169 +95,16 @@ export default class SourceDownPlugin extends Plugin {
     this.addSettingTab(new SourceDownSettingTab(this.app, this));
   }
 
-  private get appDirectory(): string {
-    return join(appDataRoot(), "SourceDown");
-  }
-
-  private get sharedStateFile(): string {
-    return join(this.appDirectory, "state.json");
-  }
-
-  private get venvDirectory(): string {
-    return join(this.appDirectory, ".venv");
-  }
-
-  private acquireInstallLock(): () => void {
-    const path = join(this.appDirectory, "install.lock");
-    mkdirSync(this.appDirectory, { recursive: true });
-    try {
-      mkdirSync(path);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      if (Date.now() - statSync(path).mtimeMs < 25 * 60_000) {
-        throw new Error("Another SourceDown vault is applying converter changes. Wait for it to finish, then try again.");
-      }
-      rmSync(path, { recursive: true, force: true });
-      mkdirSync(path);
-    }
-    return () => rmSync(path, { recursive: true, force: true });
-  }
-
-  private get venvPython(): string {
-    return join(
-      this.venvDirectory,
-      process.platform === "win32" ? "Scripts" : "bin",
-      process.platform === "win32" ? "python.exe" : "python",
-    );
-  }
-
-  private executable(engine: ConversionEngine): string {
-    return join(
-      this.venvDirectory,
-      process.platform === "win32" ? "Scripts" : "bin",
-      process.platform === "win32" ? `${ENGINES[engine].executable}.exe` : ENGINES[engine].executable,
-    );
-  }
-
   async installOrUpdate(progress: (message: string) => void): Promise<void> {
-    const release = this.acquireInstallLock();
-    try {
-      const engines = (Object.keys(ENGINES) as ConversionEngine[]).filter((engine) => this.settings.engines[engine]);
-      if (!engines.length) throw new Error("Enable at least one conversion engine.");
-      progress("Looking for Python 3.10 or newer…");
-      const python = await this.findPython();
-      progress("Creating or reusing the private environment…");
-      const addons = (Object.keys(ADDONS) as Addon[]).filter((addon) => this.settings.addons[addon]);
-      await this.createOrUpdateVenv(python, progress);
-      const packages = engines.map((engine) => packageFor(engine, engine === "markitdown" ? addons : []));
-      progress(`Installing ${engines.map((engine) => ENGINES[engine].name).join(", ")}…`);
-      await exec(this.venvPython, ["-m", "pip", "install", "--upgrade", ...packages], {
-        maxBuffer: 20 * 1024 * 1024,
-        timeout: 20 * 60_000,
-      });
-      await this.setInstalledSelections(
-        [...new Set([...(this.readSharedInstalledAddons() ?? []), ...addons])],
-        [...new Set([...(this.readSharedInstalledEngines() ?? []), ...engines])],
-      );
-    } finally {
-      release();
-    }
-  }
-
-  private async createOrUpdateVenv(python: string, progress: (message: string) => void): Promise<void> {
-    const pyvenvConfig = join(this.venvDirectory, "pyvenv.cfg");
-    const create = async (): Promise<void> => {
-      await exec(python, ["-m", "venv", this.venvDirectory], { timeout: 120_000 });
-    };
-
-    if (!existsSync(this.venvDirectory)) {
-      await create();
-      return;
-    }
-
-    if (!existsSync(pyvenvConfig)) {
-      progress("Existing environment is incomplete. Rebuilding it…");
-      rmSync(this.venvDirectory, { recursive: true, force: true });
-      await create();
-      return;
-    }
-
-    try {
-      await exec(python, ["-m", "venv", "--upgrade", this.venvDirectory], { timeout: 120_000 });
-    } catch {
-      progress("Existing environment could not be updated. Rebuilding it…");
-      rmSync(this.venvDirectory, { recursive: true, force: true });
-      await create();
-    }
-  }
-
-  private readSharedInstalledAddons(): Addon[] | null {
-    try {
-      const state: unknown = JSON.parse(readFileSync(this.sharedStateFile, "utf8"));
-      return isRecord(state) ? readAddons(state.installedAddons) : null;
-    } catch {
-      return null;
-    }
-  }
-
-  private readSharedInstalledEngines(): ConversionEngine[] | null {
-    try {
-      const state: unknown = JSON.parse(readFileSync(this.sharedStateFile, "utf8"));
-      return isRecord(state) ? readEngines(state.installedEngines) : null;
-    } catch {
-      return null;
-    }
-  }
-
-  private async setInstalledSelections(addons: Addon[], engines: ConversionEngine[]): Promise<void> {
-    this.settings.installedAddons = addons;
-    this.settings.installedEngines = engines;
-    mkdirSync(this.appDirectory, { recursive: true });
-    const temporary = `${this.sharedStateFile}.tmp`;
-    writeFileSync(temporary, `${JSON.stringify({ installedAddons: addons, installedEngines: engines }, null, 2)}\n`);
-    renameSync(temporary, this.sharedStateFile);
-    await this.saveData(this.settings);
+    await this.installer.installOrUpdate(progress);
   }
 
   private openConverter(): void {
     new ConvertModal(this.app, this).open();
   }
 
-  private async findPython(): Promise<string> {
-    const found = await this.detectPython();
-    if (found) {
-      this.settings.pythonCommand = found.command;
-      await this.saveData(this.settings);
-      return found.command;
-    }
-    throw new SetupError("Python 3.10 or newer was not found. Install Python, then click Install / update again.", true);
-  }
-
-  private async detectPython(): Promise<{ command: string; version: string } | null> {
-    for (const candidate of pythonCandidates(this.settings.pythonCommand, process.platform)) {
-      try {
-        const { stdout } = await exec(
-          candidate,
-          ["-c", "import sys; assert sys.version_info >= (3, 10); print('.'.join(map(str, sys.version_info[:3])))"],
-          { timeout: 10_000 },
-        );
-        return { command: candidate, version: stdout.trim() };
-      } catch {
-        continue;
-      }
-    }
-    return null;
-  }
-
-  addonsChanged(): boolean {
-    const selected = (Object.keys(ADDONS) as Addon[]).filter((addon) => this.settings.addons[addon]);
-    return this.settings.installedAddons === null || selected.some((addon) => !this.settings.installedAddons?.includes(addon));
-  }
-
   selectionsChanged(): boolean {
-    const selected = (Object.keys(ENGINES) as ConversionEngine[]).filter((engine) => this.settings.engines[engine]);
-    return this.addonsChanged() || this.settings.installedEngines === null ||
-      selected.some((engine) => !this.settings.installedEngines?.includes(engine));
+    return this.installer.selectionsChanged();
   }
 
   conversionEngines(): ConversionEngine[] {
@@ -344,35 +112,7 @@ export default class SourceDownPlugin extends Plugin {
   }
 
   async status(): Promise<{ ready: boolean; text: string }> {
-    const python = await this.detectPython();
-    const selected = (Object.keys(ENGINES) as ConversionEngine[]).filter((engine) => this.settings.engines[engine]);
-    if (!selected.length) return { ready: false, text: "Setup required: enable at least one conversion engine." };
-    const installed: ConversionEngine[] = [];
-    let markitdownVersion: string | null = null;
-    for (const engine of selected) {
-      try {
-        const { stdout, stderr } = await exec(this.executable(engine), [engine === "markitdown" ? "--version" : "--help"]);
-        installed.push(engine);
-        if (engine === "markitdown") markitdownVersion = `${stdout}${stderr}`.match(/\d+(?:\.\d+)+/)?.[0] ?? "unknown version";
-      } catch {
-        // Missing engines are reported below.
-      }
-    }
-    const missing = selected.filter((engine) => !installed.includes(engine));
-    if (!python && !installed.length) return { ready: false, text: "Setup required: Python 3.10+ and the selected conversion engines were not found." };
-    if (missing.length) return { ready: false, text: `Setup required: ${missing.map((engine) => ENGINES[engine].name).join(", ")} ${missing.length === 1 ? "is" : "are"} not installed.` };
-    const engineNames = installed.map((engine) =>
-      engine === "markitdown" ? `MarkItDown ${markitdownVersion}` : ENGINES[engine].name,
-    ).join(", ");
-    if (!python) return { ready: false, text: `${engineNames} installed. Python 3.10+ is needed for installs and updates.` };
-    const pinnedMarkitdown = ENGINES.markitdown.package.split("==")[1];
-    if (markitdownVersion && markitdownVersion !== pinnedMarkitdown) {
-      return {
-        ready: false,
-        text: `${engineNames} installed. SourceDown requires MarkItDown ${pinnedMarkitdown}; apply converter changes.`,
-      };
-    }
-    return { ready: true, text: `Ready: Python ${python.version} · ${engineNames}` };
+    return this.installer.status();
   }
 
   async convertVaultFile(file: TFile, name = file.basename, engine: ConversionEngine = "markitdown"): Promise<void> {
@@ -395,29 +135,31 @@ export default class SourceDownPlugin extends Plugin {
     await this.convert(url.href, noteName(name), this.settings.outputFolder);
   }
 
-  async run(action: () => Promise<void>): Promise<void> {
+  async run(action: () => Promise<void>): Promise<boolean> {
     try {
       await action();
+      return true;
     } catch (error) {
       if (error instanceof SetupError) new SetupModal(this.app, error.message, error.pythonMissing).open();
       else new Notice(error instanceof Error ? error.message : String(error), 8000);
+      return false;
     }
   }
 
   private async ensureReady(engine: ConversionEngine, addonName: string | null = null): Promise<void> {
     try {
-      await exec(this.executable(engine), ["--help"], { timeout: 10_000 });
+      await exec(this.installer.executable(engine), ["--help"], { timeout: 10_000 });
     } catch {
-      const python = await this.detectPython();
+      const python = await this.installer.detectPython();
       throw new SetupError(
         python
-          ? `${ENGINES[engine].name} is not installed. Enable it in SourceDown settings and choose Install / update.`
+          ? `${ENGINES[engine].name} is not installed. Enable it in SourceDown settings and choose Apply changes.`
           : `Python 3.10 or newer was not found. Install Python, then open SourceDown settings and install ${ENGINES[engine].name}.`,
         !python,
       );
     }
     if (engine === "markitdown" && addonName && isAddon(addonName) && !this.settings.installedAddons?.includes(addonName)) {
-      throw new SetupError(`${ADDONS[addonName]} is not installed. Enable it in SourceDown settings, then choose Install / update.`);
+      throw new SetupError(`${ADDONS[addonName]} is not installed. Enable it in SourceDown settings, then choose Apply changes.`);
     }
   }
 
@@ -484,7 +226,7 @@ export default class SourceDownPlugin extends Plugin {
       const output = mkdtempSync(join(tmpdir(), "sourcedown-"));
       const path = join(output, "output.md");
       try {
-        await runToFile(this.executable(engine), ["--keep-data-uris", source], path);
+        await runToFile(this.installer.executable(engine), ["--keep-data-uris", source], path);
         return readFileSync(path, "utf8");
       } finally {
         rmSync(output, { recursive: true, force: true });
@@ -495,7 +237,7 @@ export default class SourceDownPlugin extends Plugin {
       const args = engine === "docling"
         ? [source, "--to", "markdown", "--image-export-mode", "embedded", "--output", output]
         : [source, "--output_dir", output, "--output_format", "markdown"];
-      await exec(this.executable(engine), args, { maxBuffer: MAX_OUTPUT_BYTES, timeout: CONVERSION_TIMEOUT });
+      await exec(this.installer.executable(engine), args, { maxBuffer: MAX_OUTPUT_BYTES, timeout: CONVERSION_TIMEOUT });
       const markdown = markdownOutputFor(readdirSync(output, { recursive: true }).map(String), parse(source).name);
       if (!markdown) throw new Error(`${ENGINES[engine].name} did not produce Markdown output.`);
       const path = join(output, markdown);
@@ -512,7 +254,9 @@ export default class SourceDownPlugin extends Plugin {
     let current = "";
     for (const part of normalizePath(path).split("/").filter(Boolean)) {
       current = current ? `${current}/${part}` : part;
-      if (!this.app.vault.getAbstractFileByPath(current)) await this.app.vault.createFolder(current);
+      const existing = this.app.vault.getAbstractFileByPath(current);
+      if (existing instanceof TFile) throw new Error(`Cannot create output folder "${path}": "${current}" is already a file.`);
+      if (!existing) await this.app.vault.createFolder(current);
     }
   }
 }
@@ -549,12 +293,15 @@ class ConvertModal extends Modal {
     const helper = engineField.createEl("small");
     const recommendation = engineField.createEl("small");
     const destination = filePanel.createEl("small", { cls: "sourcedown-destination" });
+    const nameError = filePanel.createEl("small", { cls: "sourcedown-error" });
     const convert = filePanel.createEl("button", { text: "Convert file", cls: "mod-cta" });
     convert.disabled = true;
     let convertingFile = false;
 
     const updateDestination = (): void => {
-      convert.disabled = convertingFile || !availableEngines.length || !input.files?.[0] || !name.value.trim();
+      const error = noteNameError(name.value);
+      convert.disabled = convertingFile || !availableEngines.length || !input.files?.[0] || Boolean(error);
+      nameError.setText(error ?? "");
       destination.setText(`Creates: ${this.plugin.settings.outputFolder ? `${this.plugin.settings.outputFolder}/` : ""}${name.value || "…"}.md`);
     };
     const updateEngineHelp = (): void => {
@@ -596,10 +343,21 @@ class ConvertModal extends Modal {
     const urlName = row.createEl("input", { type: "text", placeholder: "Note name", attr: { "aria-label": "Note name" } });
     urlName.value = `web-${Date.now()}`;
     const convertUrl = row.createEl("button", { text: "Convert", cls: "mod-cta" });
+    const urlError = linkPanel.createEl("small", { cls: "sourcedown-error" });
     const urlDestination = linkPanel.createEl("small", { cls: "sourcedown-destination" });
     let convertingUrl = false;
+    let urlTouched = false;
     const updateUrlDestination = (): void => {
-      convertUrl.disabled = convertingUrl || !url.value.trim() || !urlName.value.trim();
+      let error = noteNameError(urlName.value);
+      if (!error) {
+        try {
+          parseImportUrl(url.value);
+        } catch (reason) {
+          error = reason instanceof Error ? reason.message : String(reason);
+        }
+      }
+      convertUrl.disabled = convertingUrl || Boolean(error);
+      urlError.setText(urlTouched ? error ?? "" : "");
       urlDestination.setText(
         `Creates: ${this.plugin.settings.outputFolder ? `${this.plugin.settings.outputFolder}/` : ""}${urlName.value || "…"}.md`,
       );
@@ -615,7 +373,14 @@ class ConvertModal extends Modal {
         updateUrlDestination();
       }
     });
-    url.addEventListener("input", updateUrlDestination);
+    url.addEventListener("input", () => {
+      urlTouched = true;
+      updateUrlDestination();
+    });
+    url.addEventListener("blur", () => {
+      urlTouched = true;
+      updateUrlDestination();
+    });
     urlName.addEventListener("input", updateUrlDestination);
     updateUrlDestination();
     const show = (link: boolean): void => {
@@ -634,7 +399,7 @@ class NameModal extends Modal {
     app: App,
     private initialName: string,
     private description: string,
-    private submit: (name: string) => Promise<void>,
+    private submit: (name: string) => Promise<boolean>,
   ) {
     super(app);
   }
@@ -643,16 +408,27 @@ class NameModal extends Modal {
     this.contentEl.createEl("h2", { text: "Choose note name" });
     this.contentEl.createEl("p", { text: this.description });
     const input = this.contentEl.createEl("input", { type: "text", value: this.initialName, cls: "sourcedown-name" });
+    const error = this.contentEl.createEl("small", { cls: "sourcedown-error" });
     const convert = this.contentEl.createEl("button", { text: "Convert", cls: "mod-cta" });
-    convert.addEventListener("click", () => {
-      void this.submit(input.value);
-      this.close();
+    const validate = (): string | null => {
+      const message = noteNameError(input.value);
+      error.setText(message ?? "");
+      convert.disabled = Boolean(message);
+      return message;
+    };
+    convert.addEventListener("click", async () => {
+      if (validate()) return;
+      convert.disabled = true;
+      if (await this.submit(input.value)) this.close();
+      else validate();
     });
+    input.addEventListener("input", validate);
     input.addEventListener("keydown", (event) => {
       if (event.key === "Enter") convert.click();
     });
     input.focus();
     input.select();
+    validate();
   }
 }
 
@@ -677,111 +453,5 @@ class SetupModal extends Modal {
       });
     }
     this.contentEl.createEl("p", { text: "Then open Settings → Community plugins → SourceDown." });
-  }
-}
-
-class SourceDownSettingTab extends PluginSettingTab {
-  constructor(app: App, private plugin: SourceDownPlugin) {
-    super(app, plugin);
-  }
-
-  display(): void {
-    this.containerEl.empty();
-    new Setting(this.containerEl).setName("Output folder").setDesc("Converted notes from the SourceDown panel are saved here.").addText((text) =>
-      text.setPlaceholder("Vault root").setValue(this.plugin.settings.outputFolder).onChange(async (value) => {
-        this.plugin.settings.outputFolder = normalizePath(value).split("/").filter((part) => part && part !== "." && part !== "..").join("/");
-        await this.plugin.saveData(this.plugin.settings);
-      }),
-    );
-
-    new Setting(this.containerEl).setName("Conversion engines").setHeading();
-    this.containerEl.createEl("p", {
-      text: "Choose the converters you want available, then apply the selection. MarkItDown is the simplest default.",
-      cls: "setting-item-description",
-    });
-    for (const [engine, details] of Object.entries(ENGINES) as Array<[ConversionEngine, (typeof ENGINES)[ConversionEngine]]>) {
-      new Setting(this.containerEl)
-        .setName(engine === "markitdown" ? "MarkItDown (recommended)" : details.name)
-        .setDesc(details.description)
-        .addToggle((toggle) =>
-          toggle.setValue(this.plugin.settings.engines[engine]).onChange(async (value) => {
-            this.plugin.settings.engines[engine] = value;
-            await this.plugin.saveData(this.plugin.settings);
-            this.updateInstallState(installer);
-          }),
-        );
-    }
-    const installer = new Setting(this.containerEl).setName("Apply converter selection");
-    installer.settingEl.addClass("sourcedown-install");
-    installer.addButton((button) =>
-      button.setButtonText("Apply changes").setCta().onClick(async () => {
-        button.setDisabled(true).setButtonText("Installing…");
-        try {
-          await this.plugin.installOrUpdate((message) => {
-            installer.setDesc(message);
-          });
-          new Notice("Converter selection applied.");
-          await this.refreshStatus(status);
-          this.updateInstallState(installer);
-        } catch (error) {
-          installer.setDesc(error instanceof Error ? error.message : String(error));
-          new Notice("Conversion engine installation failed. See settings for details.", 8000);
-        } finally {
-          button.setDisabled(false).setButtonText("Apply changes");
-        }
-      }),
-    );
-    this.updateInstallState(installer);
-
-    const status = new Setting(this.containerEl).setName("Installed converters").setDesc("Checking…");
-    status.settingEl.addClass("sourcedown-status");
-    status.addButton((button) => button.setButtonText("Refresh").onClick(() => void this.refreshStatus(status)));
-    void this.refreshStatus(status);
-
-    const advanced = this.containerEl.createEl("details", { cls: "sourcedown-advanced" });
-    advanced.createEl("summary", { text: "Advanced settings" });
-    const advancedContent = advanced.createDiv();
-    new Setting(advancedContent).setName("Python command").setDesc("Usually no change is needed. SourceDown automatically finds Python 3.10 or newer.").addText((text) =>
-      text.setValue(this.plugin.settings.pythonCommand).onChange(async (value) => {
-        this.plugin.settings.pythonCommand = value.trim();
-        await this.plugin.saveData(this.plugin.settings);
-      }),
-    ).addButton((button) =>
-      button.setButtonText("Get Python").onClick(() => {
-        void shell.openExternal("https://www.python.org/downloads/");
-      }),
-    );
-    new Setting(advancedContent).setName("MarkItDown format support").setDesc("Optional packages used only by MarkItDown. Apply converter selection after changing these.");
-    for (const [addon, label] of Object.entries(ADDONS) as Array<[Addon, string]>) {
-      new Setting(advancedContent).setName(label).addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.addons[addon]).onChange(async (value) => {
-          this.plugin.settings.addons[addon] = value;
-          await this.plugin.saveData(this.plugin.settings);
-          this.updateInstallState(installer);
-        }),
-      );
-    }
-  }
-
-  private async refreshStatus(setting: Setting): Promise<void> {
-    setting.setDesc("Checking…");
-    const status = await this.plugin.status();
-    setting.setDesc(status.text);
-    setting.settingEl.toggleClass("is-ready", status.ready);
-    setting.settingEl.toggleClass("needs-setup", !status.ready);
-  }
-
-  private updateInstallState(setting: Setting): void {
-    const selected = (Object.keys(ENGINES) as ConversionEngine[])
-      .filter((engine) => this.plugin.settings.engines[engine])
-      .map((engine) => ENGINES[engine].name);
-    setting.setDesc(
-      !selected.length
-        ? "Choose at least one converter."
-        : this.plugin.selectionsChanged()
-          ? `Not applied: ${selected.join(", ")}.`
-          : `Ready: ${selected.join(", ")}.`,
-    );
-    setting.settingEl.toggleClass("has-changes", this.plugin.selectionsChanged());
   }
 }
