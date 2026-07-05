@@ -37,6 +37,16 @@ export function numberedPath(folder: string, name: string, number: number): stri
 
 export function noteName(value: string): string {
   const name = value.trim().replace(/\.md$/i, "");
-  if (!name || name === "." || name === ".." || /[\\/]/.test(name)) throw new Error("Enter a file name without folders.");
+  const error = noteNameError(name);
+  if (error) throw new Error(error);
   return name;
+}
+
+export function noteNameError(value: string): string | null {
+  const name = value.trim().replace(/\.md$/i, "");
+  if (!name || name === "." || name === "..") return "Enter a note name.";
+  if (/[\u0000-\u001f<>:"/\\|?*]/.test(name)) return 'Note names cannot contain < > : " / \\ | ? * or control characters.';
+  if (/[. ]$/.test(name)) return "Note names cannot end with a period or space.";
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name)) return `"${name}" is reserved by Windows. Choose another name.`;
+  return null;
 }

@@ -7,7 +7,7 @@ import { clipboard, shell, webUtils } from "electron";
 import { App, FileSystemAdapter, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, normalizePath } from "obsidian";
 import { addonForFile, parseImportUrl } from "./formats";
 import { ConversionEngine, ENGINES, markdownOutputFor, packageFor, readEngines, recommendationForFile } from "./engines";
-import { noteName, numberedPath, processMarkdown } from "./output";
+import { noteName, noteNameError, numberedPath, processMarkdown } from "./output";
 import { Installer, SetupError } from "./installer";
 import { ADDONS, DEFAULT_SETTINGS, type Addon, type SourceDownSettings, isAddon, loadSettings } from "./settings";
 
@@ -134,12 +134,14 @@ export default class SourceDownPlugin extends Plugin {
     await this.convert(url.href, noteName(name), this.settings.outputFolder);
   }
 
-  async run(action: () => Promise<void>): Promise<void> {
+  async run(action: () => Promise<void>): Promise<boolean> {
     try {
       await action();
+      return true;
     } catch (error) {
       if (error instanceof SetupError) new SetupModal(this.app, error.message, error.pythonMissing).open();
       else new Notice(error instanceof Error ? error.message : String(error), 8000);
+      return false;
     }
   }
 
@@ -288,12 +290,15 @@ class ConvertModal extends Modal {
     const helper = engineField.createEl("small");
     const recommendation = engineField.createEl("small");
     const destination = filePanel.createEl("small", { cls: "sourcedown-destination" });
+    const nameError = filePanel.createEl("small", { cls: "sourcedown-error" });
     const convert = filePanel.createEl("button", { text: "Convert file", cls: "mod-cta" });
     convert.disabled = true;
     let convertingFile = false;
 
     const updateDestination = (): void => {
-      convert.disabled = convertingFile || !availableEngines.length || !input.files?.[0] || !name.value.trim();
+      const error = noteNameError(name.value);
+      convert.disabled = convertingFile || !availableEngines.length || !input.files?.[0] || Boolean(error);
+      nameError.setText(error ?? "");
       destination.setText(`Creates: ${this.plugin.settings.outputFolder ? `${this.plugin.settings.outputFolder}/` : ""}${name.value || "…"}.md`);
     };
     const updateEngineHelp = (): void => {
@@ -335,10 +340,20 @@ class ConvertModal extends Modal {
     const urlName = row.createEl("input", { type: "text", placeholder: "Note name", attr: { "aria-label": "Note name" } });
     urlName.value = `web-${Date.now()}`;
     const convertUrl = row.createEl("button", { text: "Convert", cls: "mod-cta" });
+    const urlError = linkPanel.createEl("small", { cls: "sourcedown-error" });
     const urlDestination = linkPanel.createEl("small", { cls: "sourcedown-destination" });
     let convertingUrl = false;
     const updateUrlDestination = (): void => {
-      convertUrl.disabled = convertingUrl || !url.value.trim() || !urlName.value.trim();
+      let error = noteNameError(urlName.value);
+      if (!error) {
+        try {
+          parseImportUrl(url.value);
+        } catch (reason) {
+          error = reason instanceof Error ? reason.message : String(reason);
+        }
+      }
+      convertUrl.disabled = convertingUrl || Boolean(error);
+      urlError.setText(error ?? "");
       urlDestination.setText(
         `Creates: ${this.plugin.settings.outputFolder ? `${this.plugin.settings.outputFolder}/` : ""}${urlName.value || "…"}.md`,
       );
@@ -373,7 +388,7 @@ class NameModal extends Modal {
     app: App,
     private initialName: string,
     private description: string,
-    private submit: (name: string) => Promise<void>,
+    private submit: (name: string) => Promise<boolean>,
   ) {
     super(app);
   }
@@ -382,16 +397,27 @@ class NameModal extends Modal {
     this.contentEl.createEl("h2", { text: "Choose note name" });
     this.contentEl.createEl("p", { text: this.description });
     const input = this.contentEl.createEl("input", { type: "text", value: this.initialName, cls: "sourcedown-name" });
+    const error = this.contentEl.createEl("small", { cls: "sourcedown-error" });
     const convert = this.contentEl.createEl("button", { text: "Convert", cls: "mod-cta" });
-    convert.addEventListener("click", () => {
-      void this.submit(input.value);
-      this.close();
+    const validate = (): string | null => {
+      const message = noteNameError(input.value);
+      error.setText(message ?? "");
+      convert.disabled = Boolean(message);
+      return message;
+    };
+    convert.addEventListener("click", async () => {
+      if (validate()) return;
+      convert.disabled = true;
+      if (await this.submit(input.value)) this.close();
+      else validate();
     });
+    input.addEventListener("input", validate);
     input.addEventListener("keydown", (event) => {
       if (event.key === "Enter") convert.click();
     });
     input.focus();
     input.select();
+    validate();
   }
 }
 
