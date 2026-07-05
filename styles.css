@@ -27,12 +27,25 @@
 
 .sourcedown-url {
   display: grid;
-  grid-template-columns: 2fr 1fr auto;
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
 }
 
-.sourcedown-url input {
+.sourcedown-url input,
+.sourcedown-url button {
   width: 100%;
+  min-width: 0;
+}
+
+@media (min-width: 480px) {
+  .sourcedown-url {
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto;
+    align-items: start;
+  }
+
+  .sourcedown-url button {
+    width: auto;
+  }
 }
 
 .sourcedown-field {

@@ -6,9 +6,10 @@
     "build": "node esbuild.mjs",
     "check": "tsc --noEmit",
     "test": "node test.mjs",
-    "deploy": "npm run build && mkdir -p /Users/oliverheyburn/Documents/Main/.obsidian/plugins/sourcedown && cp main.js manifest.json styles.css /Users/oliverheyburn/Documents/Main/.obsidian/plugins/sourcedown/"
+    "deploy": "npm run build && node scripts/deploy.mjs"
   },
   "repository": "https://github.com/0libote/SourceDown",
+  "author": "0libote",
   "devDependencies": {
     "@types/node": "^26.0.1",
     "esbuild": "^0.28.1",
