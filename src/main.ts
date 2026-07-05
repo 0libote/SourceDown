@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, parse } from "node:path";
 import { promisify } from "node:util";
@@ -8,8 +8,8 @@ import { App, FileSystemAdapter, Modal, Notice, Plugin, PluginSettingTab, Settin
 import { addonForFile, parseImportUrl } from "./formats";
 import { ConversionEngine, ENGINES, markdownOutputFor, packageFor, readEngines, recommendationForFile } from "./engines";
 import { noteName, numberedPath, processMarkdown } from "./output";
-import { pythonCandidates } from "./python";
-import { ADDONS, DEFAULT_SETTINGS, type Addon, type SourceDownSettings, isAddon, isRecord, loadSettings, readAddons } from "./settings";
+import { Installer, SetupError } from "./installer";
+import { ADDONS, DEFAULT_SETTINGS, type Addon, type SourceDownSettings, isAddon, loadSettings } from "./settings";
 
 const exec = promisify(execFile);
 const CONVERSION_TIMEOUT = 10 * 60_000;
@@ -67,34 +67,13 @@ function runToFile(command: string, args: string[], path: string): Promise<void>
   });
 }
 
-class SetupError extends Error {
-  constructor(message: string, readonly pythonMissing = false) {
-    super(message);
-  }
-}
-
-const appDataRoot = (): string => {
-  if (process.platform === "win32") {
-    if (process.env.LOCALAPPDATA) return process.env.LOCALAPPDATA;
-    if (process.env.USERPROFILE) return join(process.env.USERPROFILE, "AppData", "Local");
-    throw new Error("Could not find a local app data folder. Set LOCALAPPDATA or USERPROFILE and try again.");
-  }
-  if (process.platform === "darwin") {
-    if (process.env.HOME) return join(process.env.HOME, "Library", "Application Support");
-    throw new Error("Could not find a local app data folder. Set HOME and try again.");
-  }
-  if (process.env.XDG_DATA_HOME) return process.env.XDG_DATA_HOME;
-  if (process.env.HOME) return join(process.env.HOME, ".local", "share");
-  throw new Error("Could not find a local app data folder. Set XDG_DATA_HOME or HOME and try again.");
-};
-
 export default class SourceDownPlugin extends Plugin {
   settings: SourceDownSettings = DEFAULT_SETTINGS;
+  readonly installer = new Installer(this);
 
   async onload(): Promise<void> {
     this.settings = await loadSettings(this);
-    this.settings.installedAddons = this.readSharedInstalledAddons() ?? this.settings.installedAddons;
-    this.settings.installedEngines = this.readSharedInstalledEngines() ?? this.settings.installedEngines;
+    this.installer.loadSharedSelections();
     this.addRibbonIcon("file-down", "Open SourceDown", () => this.openConverter());
     this.addCommand({ id: "open-converter", name: "Open converter", callback: () => this.openConverter() });
     this.registerEvent(
@@ -115,169 +94,16 @@ export default class SourceDownPlugin extends Plugin {
     this.addSettingTab(new SourceDownSettingTab(this.app, this));
   }
 
-  private get appDirectory(): string {
-    return join(appDataRoot(), "SourceDown");
-  }
-
-  private get sharedStateFile(): string {
-    return join(this.appDirectory, "state.json");
-  }
-
-  private get venvDirectory(): string {
-    return join(this.appDirectory, ".venv");
-  }
-
-  private acquireInstallLock(): () => void {
-    const path = join(this.appDirectory, "install.lock");
-    mkdirSync(this.appDirectory, { recursive: true });
-    try {
-      mkdirSync(path);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      if (Date.now() - statSync(path).mtimeMs < 25 * 60_000) {
-        throw new Error("Another SourceDown vault is applying converter changes. Wait for it to finish, then try again.");
-      }
-      rmSync(path, { recursive: true, force: true });
-      mkdirSync(path);
-    }
-    return () => rmSync(path, { recursive: true, force: true });
-  }
-
-  private get venvPython(): string {
-    return join(
-      this.venvDirectory,
-      process.platform === "win32" ? "Scripts" : "bin",
-      process.platform === "win32" ? "python.exe" : "python",
-    );
-  }
-
-  private executable(engine: ConversionEngine): string {
-    return join(
-      this.venvDirectory,
-      process.platform === "win32" ? "Scripts" : "bin",
-      process.platform === "win32" ? `${ENGINES[engine].executable}.exe` : ENGINES[engine].executable,
-    );
-  }
-
   async installOrUpdate(progress: (message: string) => void): Promise<void> {
-    const release = this.acquireInstallLock();
-    try {
-      const engines = (Object.keys(ENGINES) as ConversionEngine[]).filter((engine) => this.settings.engines[engine]);
-      if (!engines.length) throw new Error("Enable at least one conversion engine.");
-      progress("Looking for Python 3.10 or newer…");
-      const python = await this.findPython();
-      progress("Creating or reusing the private environment…");
-      const addons = (Object.keys(ADDONS) as Addon[]).filter((addon) => this.settings.addons[addon]);
-      await this.createOrUpdateVenv(python, progress);
-      const packages = engines.map((engine) => packageFor(engine, engine === "markitdown" ? addons : []));
-      progress(`Installing ${engines.map((engine) => ENGINES[engine].name).join(", ")}…`);
-      await exec(this.venvPython, ["-m", "pip", "install", "--upgrade", ...packages], {
-        maxBuffer: 20 * 1024 * 1024,
-        timeout: 20 * 60_000,
-      });
-      await this.setInstalledSelections(
-        [...new Set([...(this.readSharedInstalledAddons() ?? []), ...addons])],
-        [...new Set([...(this.readSharedInstalledEngines() ?? []), ...engines])],
-      );
-    } finally {
-      release();
-    }
-  }
-
-  private async createOrUpdateVenv(python: string, progress: (message: string) => void): Promise<void> {
-    const pyvenvConfig = join(this.venvDirectory, "pyvenv.cfg");
-    const create = async (): Promise<void> => {
-      await exec(python, ["-m", "venv", this.venvDirectory], { timeout: 120_000 });
-    };
-
-    if (!existsSync(this.venvDirectory)) {
-      await create();
-      return;
-    }
-
-    if (!existsSync(pyvenvConfig)) {
-      progress("Existing environment is incomplete. Rebuilding it…");
-      rmSync(this.venvDirectory, { recursive: true, force: true });
-      await create();
-      return;
-    }
-
-    try {
-      await exec(python, ["-m", "venv", "--upgrade", this.venvDirectory], { timeout: 120_000 });
-    } catch {
-      progress("Existing environment could not be updated. Rebuilding it…");
-      rmSync(this.venvDirectory, { recursive: true, force: true });
-      await create();
-    }
-  }
-
-  private readSharedInstalledAddons(): Addon[] | null {
-    try {
-      const state: unknown = JSON.parse(readFileSync(this.sharedStateFile, "utf8"));
-      return isRecord(state) ? readAddons(state.installedAddons) : null;
-    } catch {
-      return null;
-    }
-  }
-
-  private readSharedInstalledEngines(): ConversionEngine[] | null {
-    try {
-      const state: unknown = JSON.parse(readFileSync(this.sharedStateFile, "utf8"));
-      return isRecord(state) ? readEngines(state.installedEngines) : null;
-    } catch {
-      return null;
-    }
-  }
-
-  private async setInstalledSelections(addons: Addon[], engines: ConversionEngine[]): Promise<void> {
-    this.settings.installedAddons = addons;
-    this.settings.installedEngines = engines;
-    mkdirSync(this.appDirectory, { recursive: true });
-    const temporary = `${this.sharedStateFile}.tmp`;
-    writeFileSync(temporary, `${JSON.stringify({ installedAddons: addons, installedEngines: engines }, null, 2)}\n`);
-    renameSync(temporary, this.sharedStateFile);
-    await this.saveData(this.settings);
+    await this.installer.installOrUpdate(progress);
   }
 
   private openConverter(): void {
     new ConvertModal(this.app, this).open();
   }
 
-  private async findPython(): Promise<string> {
-    const found = await this.detectPython();
-    if (found) {
-      this.settings.pythonCommand = found.command;
-      await this.saveData(this.settings);
-      return found.command;
-    }
-    throw new SetupError("Python 3.10 or newer was not found. Install Python, then click Install / update again.", true);
-  }
-
-  private async detectPython(): Promise<{ command: string; version: string } | null> {
-    for (const candidate of pythonCandidates(this.settings.pythonCommand, process.platform)) {
-      try {
-        const { stdout } = await exec(
-          candidate,
-          ["-c", "import sys; assert sys.version_info >= (3, 10); print('.'.join(map(str, sys.version_info[:3])))"],
-          { timeout: 10_000 },
-        );
-        return { command: candidate, version: stdout.trim() };
-      } catch {
-        continue;
-      }
-    }
-    return null;
-  }
-
-  addonsChanged(): boolean {
-    const selected = (Object.keys(ADDONS) as Addon[]).filter((addon) => this.settings.addons[addon]);
-    return this.settings.installedAddons === null || selected.some((addon) => !this.settings.installedAddons?.includes(addon));
-  }
-
   selectionsChanged(): boolean {
-    const selected = (Object.keys(ENGINES) as ConversionEngine[]).filter((engine) => this.settings.engines[engine]);
-    return this.addonsChanged() || this.settings.installedEngines === null ||
-      selected.some((engine) => !this.settings.installedEngines?.includes(engine));
+    return this.installer.selectionsChanged();
   }
 
   conversionEngines(): ConversionEngine[] {
@@ -285,35 +111,7 @@ export default class SourceDownPlugin extends Plugin {
   }
 
   async status(): Promise<{ ready: boolean; text: string }> {
-    const python = await this.detectPython();
-    const selected = (Object.keys(ENGINES) as ConversionEngine[]).filter((engine) => this.settings.engines[engine]);
-    if (!selected.length) return { ready: false, text: "Setup required: enable at least one conversion engine." };
-    const installed: ConversionEngine[] = [];
-    let markitdownVersion: string | null = null;
-    for (const engine of selected) {
-      try {
-        const { stdout, stderr } = await exec(this.executable(engine), [engine === "markitdown" ? "--version" : "--help"]);
-        installed.push(engine);
-        if (engine === "markitdown") markitdownVersion = `${stdout}${stderr}`.match(/\d+(?:\.\d+)+/)?.[0] ?? "unknown version";
-      } catch {
-        // Missing engines are reported below.
-      }
-    }
-    const missing = selected.filter((engine) => !installed.includes(engine));
-    if (!python && !installed.length) return { ready: false, text: "Setup required: Python 3.10+ and the selected conversion engines were not found." };
-    if (missing.length) return { ready: false, text: `Setup required: ${missing.map((engine) => ENGINES[engine].name).join(", ")} ${missing.length === 1 ? "is" : "are"} not installed.` };
-    const engineNames = installed.map((engine) =>
-      engine === "markitdown" ? `MarkItDown ${markitdownVersion}` : ENGINES[engine].name,
-    ).join(", ");
-    if (!python) return { ready: false, text: `${engineNames} installed. Python 3.10+ is needed for installs and updates.` };
-    const pinnedMarkitdown = ENGINES.markitdown.package.split("==")[1];
-    if (markitdownVersion && markitdownVersion !== pinnedMarkitdown) {
-      return {
-        ready: false,
-        text: `${engineNames} installed. SourceDown requires MarkItDown ${pinnedMarkitdown}; apply converter changes.`,
-      };
-    }
-    return { ready: true, text: `Ready: Python ${python.version} · ${engineNames}` };
+    return this.installer.status();
   }
 
   async convertVaultFile(file: TFile, name = file.basename, engine: ConversionEngine = "markitdown"): Promise<void> {
@@ -347,9 +145,9 @@ export default class SourceDownPlugin extends Plugin {
 
   private async ensureReady(engine: ConversionEngine, addonName: string | null = null): Promise<void> {
     try {
-      await exec(this.executable(engine), ["--help"], { timeout: 10_000 });
+      await exec(this.installer.executable(engine), ["--help"], { timeout: 10_000 });
     } catch {
-      const python = await this.detectPython();
+      const python = await this.installer.detectPython();
       throw new SetupError(
         python
           ? `${ENGINES[engine].name} is not installed. Enable it in SourceDown settings and choose Install / update.`
@@ -425,7 +223,7 @@ export default class SourceDownPlugin extends Plugin {
       const output = mkdtempSync(join(tmpdir(), "sourcedown-"));
       const path = join(output, "output.md");
       try {
-        await runToFile(this.executable(engine), ["--keep-data-uris", source], path);
+        await runToFile(this.installer.executable(engine), ["--keep-data-uris", source], path);
         return readFileSync(path, "utf8");
       } finally {
         rmSync(output, { recursive: true, force: true });
@@ -436,7 +234,7 @@ export default class SourceDownPlugin extends Plugin {
       const args = engine === "docling"
         ? [source, "--to", "markdown", "--image-export-mode", "embedded", "--output", output]
         : [source, "--output_dir", output, "--output_format", "markdown"];
-      await exec(this.executable(engine), args, { maxBuffer: MAX_OUTPUT_BYTES, timeout: CONVERSION_TIMEOUT });
+      await exec(this.installer.executable(engine), args, { maxBuffer: MAX_OUTPUT_BYTES, timeout: CONVERSION_TIMEOUT });
       const markdown = markdownOutputFor(readdirSync(output, { recursive: true }).map(String), parse(source).name);
       if (!markdown) throw new Error(`${ENGINES[engine].name} did not produce Markdown output.`);
       const path = join(output, markdown);
