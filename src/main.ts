@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, parse } from "node:path";
 import { promisify } from "node:util";
 import { clipboard, shell, webUtils } from "electron";
-import { App, FileSystemAdapter, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, normalizePath, requestUrl } from "obsidian";
+import { App, FileSystemAdapter, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, normalizePath } from "obsidian";
 import { addonForFile, parseImportUrl } from "./formats";
 import { ConversionEngine, ENGINES, markdownOutputFor, packageFor, readEngines, recommendationForFile } from "./engines";
 import { noteName, numberedPath, processMarkdown } from "./output";
@@ -23,6 +23,7 @@ function runToFile(command: string, args: string[], path: string): Promise<void>
     let bytes = 0;
     let stderr = "";
     let failure: Error | null = null;
+    let outputClosed = false;
     const timer = setTimeout(() => {
       failure = processError("Conversion timed out.", "ETIMEDOUT");
       child.kill();
@@ -36,7 +37,7 @@ function runToFile(command: string, args: string[], path: string): Promise<void>
         try {
           writeSync(output, chunk);
         } catch (error) {
-          failure = error as Error;
+          failure = error instanceof Error ? error : new Error(String(error));
           child.kill();
         }
       }
@@ -49,8 +50,16 @@ function runToFile(command: string, args: string[], path: string): Promise<void>
     });
     child.on("close", (code) => {
       clearTimeout(timer);
-      closeSync(output);
-      if (failure) reject(failure);
+      let closeFailure: Error | null = null;
+      if (!outputClosed) {
+        outputClosed = true;
+        try {
+          closeSync(output);
+        } catch (error) {
+          closeFailure = error instanceof Error ? error : new Error(String(error));
+        }
+      }
+      if (failure || closeFailure) reject(failure ?? closeFailure);
       else if (code) reject(new Error(stderr.trim() || `Converter exited with code ${code}.`));
       else resolve();
     });
@@ -356,17 +365,14 @@ export default class SourceDownPlugin extends Plugin {
       engine === "markitdown" ? `MarkItDown ${markitdownVersion}` : ENGINES[engine].name,
     ).join(", ");
     if (!python) return { ready: false, text: `${engineNames} installed. Python 3.10+ is needed for installs and updates.` };
-    let text = `Ready: Python ${python.version} · ${engineNames}`;
-    if (!markitdownVersion) return { ready: true, text };
-    try {
-      const body: unknown = (await requestUrl("https://pypi.org/pypi/markitdown/json")).json;
-      if (!isRecord(body) || !isRecord(body.info) || typeof body.info.version !== "string") throw new Error("Invalid PyPI response");
-      const latest = body.info.version;
-      text += markitdownVersion === latest ? " · Up to date" : ` · MarkItDown update available: ${latest}`;
-    } catch {
-      text += " · Could not check for updates";
+    const pinnedMarkitdown = ENGINES.markitdown.package.split("==")[1];
+    if (markitdownVersion && markitdownVersion !== pinnedMarkitdown) {
+      return {
+        ready: false,
+        text: `${engineNames} installed. SourceDown requires MarkItDown ${pinnedMarkitdown}; apply converter changes.`,
+      };
     }
-    return { ready: true, text };
+    return { ready: true, text: `Ready: Python ${python.version} · ${engineNames}` };
   }
 
   async convertVaultFile(file: TFile, name = file.basename, engine: ConversionEngine = "markitdown"): Promise<void> {
@@ -565,7 +571,7 @@ class ConvertModal extends Modal {
     name.addEventListener("input", updateDestination);
     convert.addEventListener("click", async () => {
       const file = input.files?.[0];
-      if (!file) return;
+      if (!file || convertingFile) return;
       convertingFile = true;
       updateDestination();
       try {
@@ -599,6 +605,7 @@ class ConvertModal extends Modal {
       );
     };
     convertUrl.addEventListener("click", async () => {
+      if (convertingUrl) return;
       convertingUrl = true;
       updateUrlDestination();
       try {
