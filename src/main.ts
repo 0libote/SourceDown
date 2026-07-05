@@ -3,7 +3,7 @@ import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, 
 import { tmpdir } from "node:os";
 import { join, parse } from "node:path";
 import { promisify } from "node:util";
-import { shell, webUtils } from "electron";
+import { clipboard, shell, webUtils } from "electron";
 import { App, FileSystemAdapter, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, normalizePath, requestUrl } from "obsidian";
 import { addonForFile, parseImportUrl } from "./formats";
 import { ConversionEngine, ENGINES, markdownOutputFor, packageFor, readEngines, recommendationForFile } from "./engines";
@@ -634,7 +634,7 @@ class SetupModal extends Modal {
     this.contentEl.createEl("h2", { text: "SourceDown needs setup" });
     this.contentEl.createEl("p", { text: this.message });
     this.contentEl.createEl("button", { text: "Copy error" }).addEventListener("click", () => {
-      void navigator.clipboard.writeText(this.message);
+      clipboard.writeText(this.message);
     });
     if (this.pythonMissing) {
       this.contentEl.createEl("button", { text: "Get Python", cls: "mod-cta" }).addEventListener("click", () => {
