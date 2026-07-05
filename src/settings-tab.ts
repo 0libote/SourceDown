@@ -2,6 +2,7 @@ import { shell } from "electron";
 import { App, Notice, PluginSettingTab, Setting, normalizePath } from "obsidian";
 import type SourceDownPlugin from "./main";
 import { type ConversionEngine, ENGINES } from "./engines";
+import { InstallError } from "./installer";
 import { type Addon, ADDONS } from "./settings";
 
 export class SourceDownSettingTab extends PluginSettingTab {
@@ -45,9 +46,26 @@ export class SourceDownSettingTab extends PluginSettingTab {
         );
     }
     installer.settingEl.addClass("sourcedown-install");
+    const installError = installer.settingEl.createEl("details", { cls: "sourcedown-install-error" });
+    installError.hidden = true;
+    installError.createEl("summary", { text: "Show install details" });
+    const installErrorBody = installError.createEl("pre");
+    const clearInstallError = (): void => {
+      installError.hidden = true;
+      installError.open = false;
+      installErrorBody.setText("");
+    };
+    const showInstallError = (error: unknown): void => {
+      const details = error instanceof InstallError ? error.details : error instanceof Error ? error.stack ?? error.message : String(error);
+      installErrorBody.setText(details);
+      installError.hidden = false;
+      installError.open = false;
+    };
+    clearInstallError();
     installer.addButton((button) =>
       button.setButtonText("Apply changes").setCta().onClick(() => {
         button.setDisabled(true).setButtonText("Installing…");
+        clearInstallError();
         void this.plugin
           .installOrUpdate((message) => {
             installer.setDesc(message);
@@ -60,15 +78,16 @@ export class SourceDownSettingTab extends PluginSettingTab {
             this.updateInstallState(installer);
           })
           .catch((error) => {
-            installer.setDesc(error instanceof Error ? error.message : String(error));
-            new Notice("Conversion engine installation failed. See settings for details.", 8000);
+            installer.setDesc(error instanceof InstallError ? error.message : error instanceof Error ? error.message : String(error));
+            showInstallError(error);
+            new Notice("Conversion engine installation failed. Open the details below.", 8000);
           })
           .finally(() => {
             button.setDisabled(false).setButtonText("Apply changes");
           });
       }),
     );
-    this.containerEl.append(installer.settingEl, status.settingEl);
+    this.containerEl.append(installer.settingEl, installError, status.settingEl);
     this.updateInstallState(installer);
 
     void this.refreshStatus(status);

@@ -16,6 +16,12 @@ export class SetupError extends Error {
   }
 }
 
+export class InstallError extends Error {
+  constructor(message: string, readonly details: string) {
+    super(message);
+  }
+}
+
 const appDataRoot = (): string => {
   if (process.platform === "win32") {
     if (process.env.LOCALAPPDATA) return process.env.LOCALAPPDATA;
@@ -29,6 +35,27 @@ const appDataRoot = (): string => {
   if (process.env.XDG_DATA_HOME) return process.env.XDG_DATA_HOME;
   if (process.env.HOME) return join(process.env.HOME, ".local", "share");
   throw new Error("Could not find a local app data folder. Set XDG_DATA_HOME or HOME and try again.");
+};
+
+const summarizeInstallError = (error: unknown): string => {
+  const parts: string[] = [];
+  if (error instanceof Error) parts.push(error.stack ?? error.message);
+  if (typeof error === "object" && error && "code" in error && (typeof (error as { code?: unknown }).code === "string" || typeof (error as { code?: unknown }).code === "number")) {
+    parts.push(`code: ${(error as { code: string | number }).code}`);
+  }
+  if (typeof error === "object" && error && "signal" in error && typeof (error as { signal?: unknown }).signal === "string") {
+    parts.push(`signal: ${(error as { signal: string }).signal}`);
+  }
+  if (typeof error === "object" && error && "cmd" in error && typeof (error as { cmd?: unknown }).cmd === "string") {
+    parts.push(`command: ${(error as { cmd: string }).cmd}`);
+  }
+  if (typeof error === "object" && error && "stdout" in error && typeof (error as { stdout?: unknown }).stdout === "string" && (error as { stdout: string }).stdout.trim()) {
+    parts.push(`stdout:\n${(error as { stdout: string }).stdout.trimEnd()}`);
+  }
+  if (typeof error === "object" && error && "stderr" in error && typeof (error as { stderr?: unknown }).stderr === "string" && (error as { stderr: string }).stderr.trim()) {
+    parts.push(`stderr:\n${(error as { stderr: string }).stderr.trimEnd()}`);
+  }
+  return parts.join("\n\n").trim() || "Unknown installation error.";
 };
 
 export class Installer {
@@ -81,10 +108,14 @@ export class Installer {
       const addons = (Object.keys(ADDONS) as Addon[]).filter((addon) => this.plugin.settings.addons[addon]);
       const packages = engines.map((engine) => packageFor(engine, engine === "markitdown" ? addons : []));
       progress(`Installing ${engines.map((engine) => ENGINES[engine].name).join(", ")}…`);
-      await exec(this.venvPython, ["-m", "pip", "install", "--upgrade", ...packages], {
-        maxBuffer: 20 * 1024 * 1024,
-        timeout: 20 * 60_000,
-      });
+      try {
+        await exec(this.venvPython, ["-m", "pip", "install", "--upgrade", ...packages], {
+          maxBuffer: 20 * 1024 * 1024,
+          timeout: 20 * 60_000,
+        });
+      } catch (error) {
+        throw new InstallError("Failed to install the selected converters.", summarizeInstallError(error));
+      }
       await this.setInstalledSelections(
         [...new Set([...(this.plugin.settings.installedAddons ?? []), ...addons])],
         [...new Set([...(this.plugin.settings.installedEngines ?? []), ...engines])],
