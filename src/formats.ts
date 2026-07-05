@@ -21,6 +21,9 @@ export function parseImportUrl(value: string): { href: string; youtube: boolean 
     throw new Error("Enter a valid web address, including http:// or https://.");
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("Enter an HTTP or HTTPS web address.");
-  const host = url.hostname.toLowerCase().replace(/^www\./, "");
-  return { href: url.href, youtube: host === "youtube.com" || host === "youtu.be" };
+  const host = url.hostname.toLowerCase();
+  const youtube = host === "youtu.be" || ["youtube.com", "youtube-nocookie.com"].some(
+    (domain) => host === domain || host.endsWith(`.${domain}`),
+  );
+  return { href: url.href, youtube };
 }

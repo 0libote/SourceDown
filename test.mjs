@@ -45,6 +45,8 @@ assert.equal(addonForFile("REPORT.PDF"), "pdf");
 assert.equal(addonForFile("notes.txt"), null);
 assert.deepEqual({ ...parseImportUrl(" https://example.com/page ") }, { href: "https://example.com/page", youtube: false });
 assert.equal(parseImportUrl("https://youtu.be/abc").youtube, true);
+assert.equal(parseImportUrl("https://music.youtube.com/watch?v=abc").youtube, true);
+assert.equal(parseImportUrl("https://www.youtube-nocookie.com/embed/abc").youtube, true);
 assert.equal(parseImportUrl("https://youtube.com.evil.example/watch").youtube, false);
 assert.throws(() => parseImportUrl("example.com"), /valid web address/);
 assert.throws(() => parseImportUrl("file:///tmp/report"), /HTTP or HTTPS/);

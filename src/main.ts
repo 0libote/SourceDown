@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, parse } from "node:path";
 import { promisify } from "node:util";
@@ -33,7 +33,12 @@ function runToFile(command: string, args: string[], path: string): Promise<void>
         failure = processError("Conversion output was too large.", "ERR_CHILD_PROCESS_STDIO_MAXBUFFER");
         child.kill();
       } else {
-        writeSync(output, chunk);
+        try {
+          writeSync(output, chunk);
+        } catch (error) {
+          failure = error as Error;
+          child.kill();
+        }
       }
     });
     child.stderr.on("data", (chunk: Buffer) => {
@@ -172,6 +177,22 @@ export default class SourceDownPlugin extends Plugin {
     return join(this.appDirectory, ".venv");
   }
 
+  private acquireInstallLock(): () => void {
+    const path = join(this.appDirectory, "install.lock");
+    mkdirSync(this.appDirectory, { recursive: true });
+    try {
+      mkdirSync(path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if (Date.now() - statSync(path).mtimeMs < 25 * 60_000) {
+        throw new Error("Another SourceDown vault is applying converter changes. Wait for it to finish, then try again.");
+      }
+      rmSync(path, { recursive: true, force: true });
+      mkdirSync(path);
+    }
+    return () => rmSync(path, { recursive: true, force: true });
+  }
+
   private get venvPython(): string {
     return join(
       this.venvDirectory,
@@ -189,23 +210,28 @@ export default class SourceDownPlugin extends Plugin {
   }
 
   async installOrUpdate(progress: (message: string) => void): Promise<void> {
-    const engines = (Object.keys(ENGINES) as ConversionEngine[]).filter((engine) => this.settings.engines[engine]);
-    if (!engines.length) throw new Error("Enable at least one conversion engine.");
-    progress("Looking for Python 3.10 or newer…");
-    const python = await this.findPython();
-    progress("Creating or reusing the private environment…");
-    const addons = (Object.keys(ADDONS) as Addon[]).filter((addon) => this.settings.addons[addon]);
-    await this.createOrUpdateVenv(python, progress);
-    const packages = engines.map((engine) => packageFor(engine, engine === "markitdown" ? addons : []));
-    progress(`Installing ${engines.map((engine) => ENGINES[engine].name).join(", ")}…`);
-    await exec(this.venvPython, ["-m", "pip", "install", "--upgrade", ...packages], {
-      maxBuffer: 20 * 1024 * 1024,
-      timeout: 20 * 60_000,
-    });
-    await this.setInstalledSelections(
-      [...new Set([...(this.readSharedInstalledAddons() ?? []), ...addons])],
-      [...new Set([...(this.readSharedInstalledEngines() ?? []), ...engines])],
-    );
+    const release = this.acquireInstallLock();
+    try {
+      const engines = (Object.keys(ENGINES) as ConversionEngine[]).filter((engine) => this.settings.engines[engine]);
+      if (!engines.length) throw new Error("Enable at least one conversion engine.");
+      progress("Looking for Python 3.10 or newer…");
+      const python = await this.findPython();
+      progress("Creating or reusing the private environment…");
+      const addons = (Object.keys(ADDONS) as Addon[]).filter((addon) => this.settings.addons[addon]);
+      await this.createOrUpdateVenv(python, progress);
+      const packages = engines.map((engine) => packageFor(engine, engine === "markitdown" ? addons : []));
+      progress(`Installing ${engines.map((engine) => ENGINES[engine].name).join(", ")}…`);
+      await exec(this.venvPython, ["-m", "pip", "install", "--upgrade", ...packages], {
+        maxBuffer: 20 * 1024 * 1024,
+        timeout: 20 * 60_000,
+      });
+      await this.setInstalledSelections(
+        [...new Set([...(this.readSharedInstalledAddons() ?? []), ...addons])],
+        [...new Set([...(this.readSharedInstalledEngines() ?? []), ...engines])],
+      );
+    } finally {
+      release();
+    }
   }
 
   private async createOrUpdateVenv(python: string, progress: (message: string) => void): Promise<void> {
@@ -257,7 +283,9 @@ export default class SourceDownPlugin extends Plugin {
     this.settings.installedAddons = addons;
     this.settings.installedEngines = engines;
     mkdirSync(this.appDirectory, { recursive: true });
-    writeFileSync(this.sharedStateFile, `${JSON.stringify({ installedAddons: addons, installedEngines: engines }, null, 2)}\n`);
+    const temporary = `${this.sharedStateFile}.tmp`;
+    writeFileSync(temporary, `${JSON.stringify({ installedAddons: addons, installedEngines: engines }, null, 2)}\n`);
+    renameSync(temporary, this.sharedStateFile);
     await this.saveData(this.settings);
   }
 
@@ -390,7 +418,6 @@ export default class SourceDownPlugin extends Plugin {
   private async convert(source: string, name: string, folder: string, sourceLabel = source, engine: ConversionEngine = "markitdown"): Promise<void> {
     const notice = new Notice(`Converting ${source.startsWith("http") ? source : parse(source).base}…`, 0);
     let target: string | null = null;
-    const createdAssets: string[] = [];
     try {
       const stdout = await this.convertToMarkdown(source, engine);
       await this.ensureFolder(folder);
@@ -419,7 +446,6 @@ export default class SourceDownPlugin extends Plugin {
         await this.ensureFolder(normalizePath(`${folder ? `${folder}/` : ""}${parse(image.path).dir}`));
         const path = normalizePath(`${folder ? `${folder}/` : ""}${image.path}`);
         await this.app.vault.createBinary(path, Uint8Array.from(image.bytes).buffer);
-        createdAssets.push(path);
       }
       const file = this.app.vault.getFileByPath(target);
       if (!file) throw new Error(`Could not open created note: ${target}`);
@@ -428,11 +454,9 @@ export default class SourceDownPlugin extends Plugin {
       window.setTimeout(() => notice.hide(), 4000);
     } catch (error) {
       notice.hide();
-      for (const path of createdAssets.reverse()) {
-        const file = this.app.vault.getFileByPath(path);
-        if (file) await this.app.vault.delete(file);
-      }
       if (target) {
+        const assets = this.app.vault.getAbstractFileByPath(target.replace(/\.md$/i, "-assets"));
+        if (assets) await this.app.vault.delete(assets, true);
         const file = this.app.vault.getFileByPath(target);
         if (file) await this.app.vault.delete(file);
       }
@@ -521,9 +545,10 @@ class ConvertModal extends Modal {
     const destination = filePanel.createEl("small", { cls: "sourcedown-destination" });
     const convert = filePanel.createEl("button", { text: "Convert file", cls: "mod-cta" });
     convert.disabled = true;
+    let convertingFile = false;
 
     const updateDestination = (): void => {
-      convert.disabled = !availableEngines.length || !input.files?.[0] || !name.value.trim();
+      convert.disabled = convertingFile || !availableEngines.length || !input.files?.[0] || !name.value.trim();
       destination.setText(`Creates: ${this.plugin.settings.outputFolder ? `${this.plugin.settings.outputFolder}/` : ""}${name.value || "…"}.md`);
     };
     const updateEngineHelp = (): void => {
@@ -541,10 +566,12 @@ class ConvertModal extends Modal {
     convert.addEventListener("click", async () => {
       const file = input.files?.[0];
       if (!file) return;
-      convert.disabled = true;
+      convertingFile = true;
+      updateDestination();
       try {
         await this.plugin.run(() => this.plugin.convertExternalFile(file, name.value, engine.value as ConversionEngine));
       } finally {
+        convertingFile = false;
         updateDestination();
       }
     });
@@ -552,45 +579,46 @@ class ConvertModal extends Modal {
     updateDestination();
     updateEngineHelp();
 
-    {
-      const selector = this.contentEl.createDiv("sourcedown-selector");
-      this.contentEl.insertBefore(selector, filePanel);
-      const fileButton = selector.createEl("button", { text: "File", attr: { "aria-pressed": "true" } });
-      const linkButton = selector.createEl("button", { text: "Web link", attr: { "aria-pressed": "false" } });
-      const linkPanel = this.contentEl.createDiv("sourcedown-panel");
-      linkPanel.hidden = true;
-      const row = linkPanel.createDiv("sourcedown-url");
-      const url = row.createEl("input", { type: "url", placeholder: "https://example.com", attr: { "aria-label": "Web address" } });
-      const urlName = row.createEl("input", { type: "text", placeholder: "Note name", attr: { "aria-label": "Note name" } });
-      urlName.value = `web-${Date.now()}`;
-      const convertUrl = row.createEl("button", { text: "Convert", cls: "mod-cta" });
-      const urlDestination = linkPanel.createEl("small", { cls: "sourcedown-destination" });
-      const updateUrlDestination = (): void => {
-        convertUrl.disabled = !url.value.trim() || !urlName.value.trim();
-        urlDestination.setText(
-          `Creates: ${this.plugin.settings.outputFolder ? `${this.plugin.settings.outputFolder}/` : ""}${urlName.value || "…"}.md`,
-        );
-      };
-      convertUrl.addEventListener("click", async () => {
-        convertUrl.disabled = true;
-        try {
-          await this.plugin.run(() => this.plugin.convertUrl(url.value, urlName.value));
-        } finally {
-          updateUrlDestination();
-        }
-      });
-      url.addEventListener("input", updateUrlDestination);
-      urlName.addEventListener("input", updateUrlDestination);
+    const selector = this.contentEl.createDiv("sourcedown-selector");
+    this.contentEl.insertBefore(selector, filePanel);
+    const fileButton = selector.createEl("button", { text: "File", attr: { "aria-pressed": "true" } });
+    const linkButton = selector.createEl("button", { text: "Web link", attr: { "aria-pressed": "false" } });
+    const linkPanel = this.contentEl.createDiv("sourcedown-panel");
+    linkPanel.hidden = true;
+    const row = linkPanel.createDiv("sourcedown-url");
+    const url = row.createEl("input", { type: "url", placeholder: "https://example.com", attr: { "aria-label": "Web address" } });
+    const urlName = row.createEl("input", { type: "text", placeholder: "Note name", attr: { "aria-label": "Note name" } });
+    urlName.value = `web-${Date.now()}`;
+    const convertUrl = row.createEl("button", { text: "Convert", cls: "mod-cta" });
+    const urlDestination = linkPanel.createEl("small", { cls: "sourcedown-destination" });
+    let convertingUrl = false;
+    const updateUrlDestination = (): void => {
+      convertUrl.disabled = convertingUrl || !url.value.trim() || !urlName.value.trim();
+      urlDestination.setText(
+        `Creates: ${this.plugin.settings.outputFolder ? `${this.plugin.settings.outputFolder}/` : ""}${urlName.value || "…"}.md`,
+      );
+    };
+    convertUrl.addEventListener("click", async () => {
+      convertingUrl = true;
       updateUrlDestination();
-      const show = (link: boolean): void => {
-        filePanel.hidden = link;
-        linkPanel.hidden = !link;
-        fileButton.setAttribute("aria-pressed", String(!link));
-        linkButton.setAttribute("aria-pressed", String(link));
-      };
-      fileButton.addEventListener("click", () => show(false));
-      linkButton.addEventListener("click", () => show(true));
-    }
+      try {
+        await this.plugin.run(() => this.plugin.convertUrl(url.value, urlName.value));
+      } finally {
+        convertingUrl = false;
+        updateUrlDestination();
+      }
+    });
+    url.addEventListener("input", updateUrlDestination);
+    urlName.addEventListener("input", updateUrlDestination);
+    updateUrlDestination();
+    const show = (link: boolean): void => {
+      filePanel.hidden = link;
+      linkPanel.hidden = !link;
+      fileButton.setAttribute("aria-pressed", String(!link));
+      linkButton.setAttribute("aria-pressed", String(link));
+    };
+    fileButton.addEventListener("click", () => show(false));
+    linkButton.addEventListener("click", () => show(true));
   }
 }
 
