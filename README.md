@@ -8,7 +8,7 @@ SourceDown converts PDFs, Office documents, Outlook messages, images, audio, web
 
 - Import files from the ribbon or your computer.
 - Convert vault attachments from the right-click menu.
-- Import YouTube links when transcript support is enabled.
+- Import web links; YouTube links require transcript support.
 - Save embedded images beside the generated note.
 - Preserve the source and conversion time in note properties.
 - Keep duplicate imports by giving them numbered filenames.
@@ -41,7 +41,7 @@ The plugin installs selected converters into a private virtual environment. On W
 
 Docling and Marker are substantially larger than MarkItDown and may download models when first used. Marker model licensing has additional terms; review the [Marker repository](https://github.com/datalab-to/marker) before enabling it.
 
-Local files are converted on your computer. Importing a URL or YouTube transcript requires network access to that source.
+The shared installation only grows when a vault applies its selections, so one vault cannot remove converters used by another. Local files are converted on your computer. Importing a URL or YouTube transcript requires network access to that source.
 
 ## Develop
 
