@@ -33,7 +33,19 @@ Converted notes include source metadata. Embedded images are saved beside the no
 
 MarkItDown is the default and best general choice. Docling can help with complex layouts, OCR, tables, and scanned documents; Marker can help with equations, forms, images, tables, and technical documents.
 
-Conversion engines and optional MarkItDown format support can be selected in SourceDown settings. Docling and Marker are disabled by default. Choose **Install / update** after changing selections.
+Conversion engines and optional MarkItDown format support can be selected in SourceDown settings. Docling and Marker are disabled by default. Converter changes are installed into the existing environment; SourceDown rebuilds it only when it is damaged. Choose **Apply changes** after enabling support.
+
+### MarkItDown format support
+
+| Source | Extra enabled by default | Opt-in extra |
+| --- | --- | --- |
+| PDF, DOCX, PPTX, XLSX | Yes | — |
+| Outlook MSG, legacy XLS | — | Outlook or XLS |
+| MP3, WAV, M4A, FLAC | — | Audio transcription |
+| YouTube links | — | YouTube transcription |
+| Web pages, HTML, CSV, JSON, XML, ZIP, EPUB, images, and plain text | No extra required | — |
+
+The default extras cover common document imports without installing every optional dependency. Existing installations keep their saved choices. Docling and Marker manage their own format dependencies.
 
 ## Local installation
 
@@ -41,7 +53,7 @@ The plugin installs selected converters into a private virtual environment. On W
 
 Docling and Marker are substantially larger than MarkItDown and may download models when first used. Marker model licensing has additional terms; review the [Marker repository](https://github.com/datalab-to/marker) before enabling it.
 
-The shared installation only grows when a vault applies its selections, so one vault cannot remove converters used by another. Local files are converted on your computer. Importing a URL or YouTube transcript requires network access to that source.
+The shared installation only grows when a vault applies its selections, so one vault cannot remove converters used by another. Converter status and version checks are local and do not contact PyPI. Local files are converted on your computer. Importing a URL or YouTube transcript requires network access to that source.
 
 ## Develop
 
