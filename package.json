@@ -16,7 +16,7 @@
     "@eslint/json": "^2.0.1",
     "@types/node": "^26.1.0",
     "esbuild": "^0.28.1",
-    "eslint": "^10.6.0",
+    "eslint": "^10.7.0",
     "eslint-plugin-obsidianmd": "^0.4.1",
     "globals": "^17.7.0",
     "obsidian": "^1.8.0",
