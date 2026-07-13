@@ -1,9 +1,9 @@
 name: Validate Bun migration
 
 on:
-  push:
+  pull_request:
     branches:
-      - chore/migrate-to-bun
+      - main
 
 permissions:
   contents: read
