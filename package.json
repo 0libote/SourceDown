@@ -21,7 +21,7 @@
     "eslint-plugin-obsidianmd": "^0.4.1",
     "globals": "^17.7.0",
     "obsidian": "^1.8.0",
-    "typescript": "^6.0.3",
-    "typescript-eslint": "^8.63.0"
+    "typescript": "^7.0.2",
+    "typescript-eslint": "^8.64.0"
   }
 }
