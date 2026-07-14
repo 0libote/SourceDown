@@ -14,11 +14,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v4
+      - uses: oven-sh/setup-bun@v2
         with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
+          bun-version: 1.3.14
+      - run: bun ci
       - name: Sync version from tag
         id: sync-version
         run: |
@@ -76,9 +75,9 @@ jobs:
       - name: Version already synced
         if: steps.sync-version.outputs.changed != 'true'
         run: echo "Version files already match ${{ steps.sync-version.outputs.version }}"
-      - run: npm test
-      - run: npm run check
-      - run: npm run build
+      - run: bun run test
+      - run: bun run check
+      - run: bun run build
       - name: Attest main.js
         uses: actions/attest@v4
         with:
