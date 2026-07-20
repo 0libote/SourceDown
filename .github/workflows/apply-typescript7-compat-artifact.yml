@@ -1,0 +1,65 @@
+name: Apply TypeScript 7 compatibility artifact
+
+on:
+  workflow_run:
+    workflows: ["Generate TypeScript 7 compatibility artifact"]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: write
+  pull-requests: read
+
+jobs:
+  apply:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Resolve and validate originating Dependabot pull request
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
+        run: |
+          set -euo pipefail
+          test "$HEAD_REPOSITORY" = "$REPOSITORY"
+          test "$HEAD_BRANCH" = 'dependabot/bun/typescript-7.0.2'
+          owner=${REPOSITORY%%/*}
+          pr_json=$(gh api "repos/$REPOSITORY/pulls?state=open&head=$owner:$HEAD_BRANCH" --jq '.[0]')
+          test "$(jq -r '.user.login' <<<"$pr_json")" = 'dependabot[bot]'
+          jq -er '.title | contains("typescript from 6.0.3 to 7.0.2")' <<<"$pr_json" >/dev/null
+          echo "number=$(jq -r '.number' <<<"$pr_json")" >> "$GITHUB_OUTPUT"
+      - name: Download generated artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: gh run download "$RUN_ID" --repo "$REPOSITORY" --name "typescript7-compat-$PR_NUMBER" --dir generated
+      - name: Check out validated Dependabot branch
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_branch }}
+      - name: Validate artifact and update lockfile only
+        run: |
+          set -euo pipefail
+          cmp package.json generated/package.json
+          grep -Fq '"@typescript/native": "npm:typescript@7.0.2"' generated/package.json
+          grep -Fq '"typescript": "npm:@typescript/typescript6@6.0.2"' generated/package.json
+          grep -Fq '"@typescript/native": ["typescript@7.0.2"' generated/bun.lock
+          grep -Fq '"typescript": ["@typescript/typescript6@6.0.2"' generated/bun.lock
+          cp generated/bun.lock bun.lock
+      - name: Commit generated lockfile
+        env:
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+          git add bun.lock
+          git diff --cached --quiet && exit 0
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'chore: regenerate lockfile for TypeScript 7 compatibility'
+          git push origin "HEAD:$HEAD_BRANCH"
