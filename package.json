@@ -16,13 +16,13 @@
     "@eslint/js": "^10.0.1",
     "@eslint/json": "^2.0.1",
     "@types/node": "^26.1.1",
-    "@typescript/native": "npm:typescript@^7.0.2",
+    "@typescript/native": "npm:typescript@7.0.2",
     "esbuild": "^0.28.1",
     "eslint": "^10.7.0",
     "eslint-plugin-obsidianmd": "^0.4.1",
     "globals": "^17.7.0",
     "obsidian": "^1.8.0",
-    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "typescript": "npm:@typescript/typescript6@6.0.2",
     "typescript-eslint": "^8.63.0"
   }
 }
