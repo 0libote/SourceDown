@@ -1,0 +1,71 @@
+name: Dependabot verification
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Check out pull request
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+      - name: Audit production and development dependencies
+        run: bun audit --audit-level=high
+      - name: Run tests
+        run: bun run test
+      - name: Run type-check
+        run: bun run check
+      - name: Run lint
+        run: bun run lint
+      - name: Build release bundle
+        run: bun run build
+
+  bot-review:
+    if: always() && github.event.pull_request.user.login == 'dependabot[bot]'
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Submit isolated GitHub Actions review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          VERIFY_RESULT: ${{ needs.verify.result }}
+        run: |
+          set -euo pipefail
+          if [ "$VERIFY_RESULT" = "success" ]; then
+            body=$(printf '%s\n\n%s\n%s\n%s\n%s' \
+              'Automated dependency code review: PASSED.' \
+              "PR: $PR_TITLE" \
+              'The frozen lockfile install, high-severity dependency audit, tests, type-check, lint, and release build all passed.' \
+              'The Dependabot compatibility score in the PR description remains the upstream bot risk indicator.' \
+              'The verification job used a read-only token; this review job did not check out or execute pull-request code.')
+          else
+            body=$(printf '%s\n\n%s\n%s\n%s' \
+              'Automated dependency code review: BLOCKED.' \
+              "PR: $PR_TITLE" \
+              "Verification result: $VERIFY_RESULT. Review the failed GitHub Actions steps before merging." \
+              'No pull-request code was executed with this review job’s write-enabled token.')
+          fi
+          gh pr review "$PR_URL" --comment --body "$body"
+          test "$VERIFY_RESULT" = "success"
