@@ -9,6 +9,7 @@
   "scripts": {
     "build": "bun esbuild.mjs",
     "check": "node node_modules/@typescript/native/bin/tsc --noEmit",
+    "check:tooling": "tsc --noEmit",
     "lint": "eslint src",
     "test": "bun test.mjs",
     "deploy": "bun run build && bun scripts/deploy.mjs"
