@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Resolve and validate originating Dependabot pull request
+      - name: Resolve validated Dependabot pull request
         id: pr
         env:
           GH_TOKEN: ${{ github.token }}
@@ -39,18 +39,19 @@ jobs:
           RUN_ID: ${{ github.event.workflow_run.id }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
         run: gh run download "$RUN_ID" --repo "$REPOSITORY" --name "typescript7-compat-$PR_NUMBER" --dir generated
-      - name: Check out validated Dependabot branch
+      - name: Check out validated branch
         uses: actions/checkout@v6
         with:
           ref: ${{ github.event.workflow_run.head_branch }}
-      - name: Validate artifact and update lockfile only
+      - name: Validate and apply generated lockfile
         run: |
           set -euo pipefail
           cmp package.json generated/package.json
           grep -Fq '"@typescript/native": "npm:typescript@7.0.2"' generated/package.json
-          grep -Fq '"typescript": "npm:@typescript/typescript6@6.0.2"' generated/package.json
+          grep -Fq '"typescript": "6.0.3"' generated/package.json
+          grep -Fq 'node node_modules/@typescript/native/bin/tsc --noEmit' generated/package.json
           grep -Fq '"@typescript/native": ["typescript@7.0.2"' generated/bun.lock
-          grep -Fq '"typescript": ["@typescript/typescript6@6.0.2"' generated/bun.lock
+          grep -Fq '"typescript": ["typescript@6.0.3"' generated/bun.lock
           cp generated/bun.lock bun.lock
       - name: Commit generated lockfile
         env:
