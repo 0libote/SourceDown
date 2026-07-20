@@ -29,7 +29,7 @@ jobs:
           const fs = require('node:fs');
           const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
           pkg.devDependencies['@typescript/native'] = 'npm:typescript@^7.0.2';
-          pkg.devDependencies.typescript = 'npm:@typescript/typescript6@^6.0.3';
+          pkg.devDependencies.typescript = 'npm:@typescript/typescript6@^6.0.2';
           fs.writeFileSync('package.json', `${JSON.stringify(pkg, null, 2)}\n`);
           NODE
           bun install --ignore-scripts
